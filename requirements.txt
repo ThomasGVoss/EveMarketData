@@ -1,0 +1,12 @@
+pandas
+numpy
+scikit-learn
+jupyter
+ipykernel
+notebook
+matplotlib
+polars
+duckdb
+polars
+pytz
+pyarrow
