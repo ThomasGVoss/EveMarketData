@@ -30,8 +30,6 @@ extras = {
         "pydocstyle",
         "pytest",
         "pytest-cov",
-        "sagemaker",
-        "tox",
     ]
 }
 setuptools.setup(

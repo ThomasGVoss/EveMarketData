@@ -15,6 +15,8 @@ data/*
 # Materials in the pipelines folder and the egg
 src/pipelines/__pycache__
 src/pipelines/abalone/__pycache__
+tests/__pycache__
+tests/pipelines/abalone/__pycache__
 src/*.egg-info
 
 #Terraform material
