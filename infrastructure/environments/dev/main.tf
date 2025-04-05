@@ -104,3 +104,18 @@ module "sagemaker_domain" {
     AccountId   = data.aws_caller_identity.current.account_id
   }
 }
+
+# Glue Resources for Market Data Analytics
+module "market_data_glue" {
+  source = "../../modules/glue"
+
+  environment    = var.environment
+  s3_bucket_name = module.market_data_bucket.bucket_id
+  crawler_schedule = "cron(0 0/23 * * ? *)"  # Läuft alle 12 Stunden (um 0:00, 12:00 Uhr)
+  
+  tags = {
+    Environment = var.environment
+    Project     = "EveMarketData"
+    AccountId   = data.aws_caller_identity.current.account_id
+  }
+}
