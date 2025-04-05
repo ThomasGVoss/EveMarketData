@@ -13,12 +13,12 @@ output "glue_orders_crawler_name" {
   value       = aws_glue_crawler.market_orders_crawler.name
 }
 
-output "glue_job_name" {
-  description = "Name of the Glue job for data consolidation"
-  value       = aws_glue_job.consolidate_market_data.name
-}
-
 output "glue_role_arn" {
   description = "ARN of the IAM role used for Glue"
   value       = aws_iam_role.glue_role.arn
+}
+
+output "glue_role_name" {
+  description = "Name of the IAM role used for Glue"
+  value       = aws_iam_role.glue_role.name
 }

@@ -26,4 +26,4 @@ output "execution_role_arn" {
 output "execution_role_name" {
   description = "The name of the IAM role created for SageMaker execution"
   value       = aws_iam_role.sagemaker_execution_role.name
-} 
+}

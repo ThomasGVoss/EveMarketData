@@ -3,6 +3,12 @@ variable "bucket_name" {
   type        = string
 }
 
+variable "bucket_purpose" {
+  description = "Purpose of the bucket (e.g., 'market-data', 'athena-results')"
+  type        = string
+  default     = "default"
+}
+
 variable "tags" {
   description = "A map of tags to assign to resources"
   type        = map(string)
@@ -31,4 +37,16 @@ variable "enable_versioning" {
   description = "Whether to enable versioning for the S3 bucket"
   type        = bool
   default     = false
+}
+
+variable "enable_lifecycle" {
+  description = "Whether to enable lifecycle rules for the S3 bucket"
+  type        = bool
+  default     = true
+}
+
+variable "create_folders" {
+  description = "List of top-level folders to create in the bucket"
+  type        = list(string)
+  default     = []
 } 

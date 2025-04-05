@@ -40,11 +40,10 @@ output "sagemaker_execution_role_arn" {
 
 output "sagemaker_bucket" {
   description = "Name of the S3 bucket created for SageMaker"
-  value       = aws_s3_bucket.sagemaker_bucket.bucket
+  value       = module.sagemaker_bucket.bucket_id
 } 
 
 output "sagemaker_bucket_arn" {
   description = "ARN of the S3 bucket created for SageMaker"
-  value       = aws_s3_bucket.sagemaker_bucket.arn
+  value       = module.sagemaker_bucket.bucket_arn
 }
-

@@ -1,10 +1,21 @@
 # Create S3 bucket for SageMaker
-resource "aws_s3_bucket" "sagemaker_bucket" {
-  bucket = "sagemaker-${var.environment}-${data.aws_caller_identity.current.account_id}"
+module "sagemaker_bucket" {
+  source = "../../modules/s3"
 
+  bucket_name    = "sagemaker-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket_purpose = "sagemaker"
+  
+  # SageMaker-specific configurations
+  enable_lifecycle          = true
+  standard_ia_transition_days = 31  # Keep data in standard longer for active use
+  glacier_transition_days     = 90 # Move to Glacier later
+  expiration_days             = 365 # Longer retention for ML data
+  enable_versioning           = false # Version control for ML artifacts
+    
   tags = {
-    Name        = "SageMaker Bucket"
     Environment = var.environment
+    Project     = "SageMaker"
+    Purpose     = "Machine Learning Environment"
   }
 }
 
@@ -12,18 +23,20 @@ resource "aws_s3_bucket" "sagemaker_bucket" {
 module "market_data_bucket" {
   source = "../../modules/s3"
 
-  bucket_name = "market-data-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket_name    = "market-data-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket_purpose = "market-data"
   
   # Optional configurations
-  standard_ia_transition_days = 30
+  enable_lifecycle          = true
+  standard_ia_transition_days = 31
   glacier_transition_days     = 90
   expiration_days             = 365
   enable_versioning           = false
-  
+    
   tags = {
-    Name        = "Market Data Bucket"
     Environment = var.environment
     Project     = "EveMarketData"
+    Purpose     = "Market Data Storage"
   }
 }
 
@@ -33,7 +46,7 @@ module "market_prices_lambda" {
 
   function_name       = "market-data-prices-ingestion"
   handler             = "market_price_ingestion.lambda_handler"
-  source_dir          = "src/market_prices"  # Create this directory
+  source_dir          = "src/market_prices" 
   environment         = var.environment
   s3_bucket_name      = module.market_data_bucket.bucket_id
   schedule_expression = "rate(12 hours)"
@@ -51,7 +64,7 @@ module "market_orders_lambda" {
 
   function_name       = "market-data-orders-ingestion"
   handler             = "market_order_ingestion.lambda_handler"
-  source_dir          = "src/market_orders"  # Create this directory
+  source_dir          = "src/market_orders" 
   environment         = var.environment
   s3_bucket_name      = module.market_data_bucket.bucket_id
   schedule_expression = "rate(12 hours)"
@@ -85,8 +98,8 @@ module "sagemaker_domain" {
   app_network_access_type = "VpcOnly"
 
   # S3 configuration
-  s3_bucket_arn  = aws_s3_bucket.sagemaker_bucket.arn
-  s3_output_path = "s3://${aws_s3_bucket.sagemaker_bucket.bucket}/outputs"
+  s3_bucket_arn  = module.sagemaker_bucket.bucket_arn
+  s3_output_path = "s3://${module.sagemaker_bucket.bucket_id}/outputs"
 
   # User profile configuration
   create_default_user_profile  = true
@@ -117,5 +130,47 @@ module "market_data_glue" {
     Environment = var.environment
     Project     = "EveMarketData"
     AccountId   = data.aws_caller_identity.current.account_id
+  }
+}
+
+# Athena Resources for Market Data Analytics
+module "market_data_athena" {
+  source = "../../modules/athena"
+
+  environment        = var.environment
+  glue_database_name = module.market_data_glue.glue_database_name
+  athena_results_bucket_name = module.athena_results_bucket.bucket_id
+
+  tags = {
+    Environment = var.environment
+    Project     = "EveMarketData"
+    AccountId   = data.aws_caller_identity.current.account_id
+  }
+}
+
+# Attach Athena permissions to the existing role if needed
+resource "aws_iam_role_policy_attachment" "athena_permissions" {
+  role       = module.market_data_glue.glue_role_name # You might need to add this as an output in your glue module
+  policy_arn = module.market_data_athena.athena_policy_arn
+}
+
+# Athena results bucket
+module "athena_results_bucket" {
+  source = "../../modules/s3"
+
+  bucket_name    = "athena-results-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket_purpose = "athena-results"
+  
+  # Different lifecycle settings for query results
+  enable_lifecycle          = true
+  standard_ia_transition_days = 31  # Move to IA sooner
+  glacier_transition_days     = 90 # Move to Glacier sooner
+  expiration_days             = 365 # Shorter retention
+  enable_versioning           = false
+  
+  tags = {
+    Environment = var.environment
+    Project     = "EveMarketData"
+    Purpose     = "Athena Query Results"
   }
 }

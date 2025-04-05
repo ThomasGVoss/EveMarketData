@@ -1,14 +1,21 @@
-resource "aws_s3_bucket" "market_data_bucket" {
+resource "aws_s3_bucket" "bucket" {
   bucket = var.bucket_name
 
-  tags = var.tags
+  tags = merge(
+    var.tags,
+    {
+      Name = var.bucket_name
+    }
+  )
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "market_data_lifecycle" {
-  bucket = aws_s3_bucket.market_data_bucket.id
+# Apply lifecycle configuration only if enabled
+resource "aws_s3_bucket_lifecycle_configuration" "bucket_lifecycle" {
+  count  = var.enable_lifecycle ? 1 : 0
+  bucket = aws_s3_bucket.bucket.id
 
   rule {
-    id     = "market-data-lifecycle"
+    id     = "${var.bucket_purpose}-lifecycle"
     status = "Enabled"
 
     transition {
@@ -27,8 +34,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "market_data_lifecycle" {
   }
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "market_data_encryption" {
-  bucket = aws_s3_bucket.market_data_bucket.id
+resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption" {
+  bucket = aws_s3_bucket.bucket.id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -37,19 +44,28 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "market_data_encry
   }
 }
 
-resource "aws_s3_bucket_versioning" "market_data_versioning" {
-  bucket = aws_s3_bucket.market_data_bucket.id
+resource "aws_s3_bucket_versioning" "bucket_versioning" {
+  bucket = aws_s3_bucket.bucket.id
   
   versioning_configuration {
     status = var.enable_versioning ? "Enabled" : "Disabled"
   }
 }
 
-resource "aws_s3_bucket_public_access_block" "market_data_public_access_block" {
-  bucket = aws_s3_bucket.market_data_bucket.id
+resource "aws_s3_bucket_public_access_block" "bucket_public_access_block" {
+  bucket = aws_s3_bucket.bucket.id
 
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# Create top-level folders if specified
+resource "aws_s3_object" "folders" {
+  for_each = toset(var.create_folders)
+  
+  bucket  = aws_s3_bucket.bucket.id
+  key     = "${each.value}/"
+  content = ""
 } 
