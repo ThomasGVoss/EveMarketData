@@ -14,6 +14,7 @@ import os
 import boto3
 import sagemaker
 import sagemaker.session
+from datetime import datetime
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
@@ -119,7 +120,24 @@ def get_pipeline(
         default_value=f"s3://sagemaker-servicecatalog-seedcode-{region}/dataset/abalone-dataset.csv",
     )
 
-    ## PROCESSING ##
+    # Create timestamp for unique paths
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+    # Upload the preprocessing script to S3
+    preprocessing_code_prefix = f"{base_job_prefix}/{timestamp}/processing_code"
+    preprocessing_code_s3_uri = sagemaker_session.upload_data(
+        path="pipelines/abalone/preprocess.py",
+        bucket=default_bucket,
+        key_prefix=preprocessing_code_prefix
+    )
+
+    #Upload the evaluation script to S3
+    evaluation_code_prefix = f"{base_job_prefix}/{timestamp}/evaluation_code"
+    evaluation_code_s3_uri = sagemaker_session.upload_data(
+        path="pipelines/abalone/evaluate.py",
+        bucket=default_bucket,
+        key_prefix=evaluation_code_prefix
+    )
 
     # processing step for feature engineering
     sklearn_processor = SKLearnProcessor(
@@ -130,20 +148,27 @@ def get_pipeline(
         sagemaker_session=sagemaker_session,
         role=role,
     )
+    # I dislike the ProcessingOutput destination. I think i'll have to find a way to pass the timestamp to the processing step.
     step_process = ProcessingStep(
         name="PreprocessAbaloneData",
         processor=sklearn_processor,
         outputs=[
-            ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
-            ProcessingOutput(output_name="validation", source="/opt/ml/processing/validation"),
-            ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
+            ProcessingOutput(output_name="train", 
+                             source="/opt/ml/processing/train",
+                             destination=f"{timestamp}/train"),
+            ProcessingOutput(output_name="validation", 
+                             source="/opt/ml/processing/validation",
+                             destination=f"{timestamp}/validation"),
+            ProcessingOutput(output_name="test", 
+                             source="/opt/ml/processing/test",
+                             destination=f"{timestamp}/test"),
         ],
-        code="pipelines/abalone/preprocess.py",
+        code=preprocessing_code_s3_uri,
         job_arguments=["--input-data", input_data],
     )
 
     # training step for generating model artifacts
-    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/AbaloneTrain"
+    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/{timestamp}/AbaloneTrain"
     image_uri = sagemaker.image_uris.retrieve(
         framework="xgboost",
         region=region,
@@ -192,42 +217,42 @@ def get_pipeline(
         },
     )
 
-    # # processing step for evaluation
-    # script_eval = ScriptProcessor(
-    #     image_uri=image_uri,
-    #     command=["python3"],
-    #     instance_type=processing_instance_type,
-    #     instance_count=1,
-    #     base_job_name=f"{base_job_prefix}/script-abalone-eval",
-    #     sagemaker_session=sagemaker_session,
-    #     role=role,
-    # )
-    # evaluation_report = PropertyFile(
-    #     name="AbaloneEvaluationReport",
-    #     output_name="evaluation",
-    #     path="evaluation.json",
-    # )
-    # step_eval = ProcessingStep(
-    #     name="EvaluateAbaloneModel",
-    #     processor=script_eval,
-    #     inputs=[
-    #         ProcessingInput(
-    #             source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
-    #             destination="/opt/ml/processing/model",
-    #         ),
-    #         ProcessingInput(
-    #             source=step_process.properties.ProcessingOutputConfig.Outputs[
-    #                 "test"
-    #             ].S3Output.S3Uri,
-    #             destination="/opt/ml/processing/test",
-    #         ),
-    #     ],
-    #     outputs=[
-    #         ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/evaluation"),
-    #     ],
-    #     code=os.path.join(BASE_DIR, "evaluate.py"),
-    #     property_files=[evaluation_report],
-    # )
+    # processing step for evaluation
+    script_eval = ScriptProcessor(
+        image_uri=image_uri,
+        command=["python3"],
+        instance_type=processing_instance_type,
+        instance_count=1,
+        base_job_name=f"{base_job_prefix}/script-abalone-eval",
+        sagemaker_session=sagemaker_session,
+        role=role,
+    )
+    evaluation_report = PropertyFile(
+        name="AbaloneEvaluationReport",
+        output_name="evaluation",
+        path="evaluation.json",
+    )
+    step_eval = ProcessingStep(
+        name="EvaluateAbaloneModel",
+        processor=script_eval,
+        inputs=[
+            ProcessingInput(
+                source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+                destination="/opt/ml/processing/model",
+            ),
+            ProcessingInput(
+                source=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "test"
+                ].S3Output.S3Uri,
+                destination="/opt/ml/processing/test",
+            ),
+        ],
+        outputs=[
+            ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/evaluation", destination=f"{timestamp}/evaluation"),
+        ],
+        code=evaluation_code_s3_uri,
+        property_files=[evaluation_report],
+    )
 
     # # register model step that will be conditionally executed
     # model_metrics = ModelMetrics(
@@ -277,7 +302,9 @@ def get_pipeline(
             model_approval_status,
             input_data,
         ],
-        steps=[step_process, step_train],
+        steps=[step_process, 
+               step_train,
+               step_eval],
         sagemaker_session=sagemaker_session,
     )
     return pipeline
