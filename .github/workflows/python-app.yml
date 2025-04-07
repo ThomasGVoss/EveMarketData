@@ -23,5 +23,6 @@ jobs:
     - name: Install dependencies and 
       run: |
         python -m pip install --upgrade pip
-        python -m venv .venv
-        sh infrastructure/scripts/test.sh
+        cd src
+        pip install -e ".[test]"
+        pytest ../tests/     
