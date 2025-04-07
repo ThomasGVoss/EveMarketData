@@ -86,6 +86,7 @@ def get_pipeline(
     sagemaker_project_arn=None,
     role=None,
     default_bucket=None,
+    pipeline_bucket=None,
     model_package_group_name="AbalonePackageGroup",
     pipeline_name="AbalonePipeline",
     base_job_prefix="Abalone",
@@ -104,6 +105,23 @@ def get_pipeline(
     if role is None:
         role = sagemaker.session.get_execution_role(sagemaker_session)
 
+    now = datetime.now()
+    day = now.strftime("%Y-%m-%d")
+    date = now.strftime("%Y-%m-%d--%H-%M-%S")
+    pipeline_run_id = str(uuid.uuid4())[:8]
+    output_destination = f"s3://{pipeline_bucket}/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
+    metadata_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/metadata/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
+    model_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/models/{pipeline_name}"
+
+    # output_inference_result_bucket = output_inference_result_bucket_arn.split(":::")[1]
+    # output_training_result_path = f"s3://{output_inference_result_bucket}/training/{branch_prefix}/{pipeline_name}/{day}/{pipeline_name}--{date}--{pipeline_run_id}"
+
+    logger.debug(f"Model name:  {model_name}")
+    logger.debug(f"Output destination:  {output_destination}")
+    logger.debug(f"Metadata path:  {metadata_path}")
+    logger.debug(f"Output training:  {output_training_result_path}")
+    logger.debug(f"Sagemaker version: {sagemaker.__version__}")
+  
     # parameters for pipeline execution
     processing_instance_count = ParameterInteger(name="ProcessingInstanceCount", default_value=1)
     processing_instance_type = ParameterString(
