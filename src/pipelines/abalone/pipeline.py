@@ -139,6 +139,61 @@ def get_pipeline(
         key_prefix=evaluation_code_prefix
     )
 
+    # ---------- 1. Split Vessel Rotation Dataset  --------
+    splitting_job_name = f"splitting--{date}"
+    
+    sklearn_preprocessing = FrameworkProcessor(
+        role=role,
+        estimator_cls=SKLearnClass,
+        framework_version=sklearn_framework_version,
+        instance_count=1,
+        instance_type=splitting_instance_type,
+        sagemaker_session=sagemaker_session,
+        code_location=output_destination,
+        env={
+            "min_train_date": min_train_date,
+            "train_val_split_date": train_val_split_date,
+            "val_test_split_date": val_test_split_date,
+            "max_test_date": max_test_date,
+            "project_name": "combined",
+        },
+    )
+    
+    step_args = sklearn_preprocessing.run(
+        job_name=splitting_job_name,
+        code="combined_model/training/pipeline_scripts/splitting/main.py",
+        source_dir="../../../src",
+        inputs=[
+            ProcessingInput(
+                source=input_vessel_rotation,
+                destination="/opt/ml/processing/input/data/",
+                s3_data_type="S3Prefix",
+                s3_input_mode="File",
+            ),
+        ],
+        outputs=[
+            ProcessingOutput(
+                output_name="split",
+                source="/opt/ml/processing/output/split",
+                destination=Join(
+                    on="/",
+                    values=[
+                        output_destination,
+                        splitting_job_name,
+                        "output",
+                        "split",
+                    ],
+                ),
+            )
+        ],
+    )
+    
+    step_split = ProcessingStep(
+        name=f"{project_name}-splitting",
+        step_args=step_args,
+        cache_config=cache_config,
+    )
+
     # processing step for feature engineering
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
