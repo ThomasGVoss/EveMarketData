@@ -116,6 +116,10 @@ def get_pipeline(
     # output_inference_result_bucket = output_inference_result_bucket_arn.split(":::")[1]
     # output_training_result_path = f"s3://{output_inference_result_bucket}/training/{branch_prefix}/{pipeline_name}/{day}/{pipeline_name}--{date}--{pipeline_run_id}"
 
+    # Versions
+    sklearn_framework_version = "1.2-1"
+    xgboost_framework_version = "1.7-1"
+  
     logger.debug(f"Model name:  {model_name}")
     logger.debug(f"Output destination:  {output_destination}")
     logger.debug(f"Metadata path:  {metadata_path}")
