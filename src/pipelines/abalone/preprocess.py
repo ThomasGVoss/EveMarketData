@@ -13,86 +13,55 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler())
-
-
-# Since we get a headerless CSV file we specify the column names here.
-feature_columns_names = [
-    "sex",
-    "length",
-    "diameter",
-    "height",
-    "whole_weight",
-    "shucked_weight",
-    "viscera_weight",
-    "shell_weight",
-]
-label_column = "rings"
-
-feature_columns_dtype = {
-    "sex": str,
-    "length": np.float64,
-    "diameter": np.float64,
-    "height": np.float64,
-    "whole_weight": np.float64,
-    "shucked_weight": np.float64,
-    "viscera_weight": np.float64,
-    "shell_weight": np.float64,
-}
-label_column_dtype = {"rings": np.float64}
-
-
-def merge_two_dicts(x, y):
-    """Merges two dicts, returning a new copy."""
-    z = x.copy()
-    z.update(y)
-    return z
-
 
 if __name__ == "__main__":
     logger.debug("Starting preprocessing.")
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-data", type=str, required=True)
-    args = parser.parse_args()
 
     base_dir = "/opt/ml/processing"
-    pathlib.Path(f"{base_dir}/data").mkdir(parents=True, exist_ok=True)
-    input_data = args.input_data
-    bucket = input_data.split("/")[2]
-    key = "/".join(input_data.split("/")[3:])
-
-    logger.info("Downloading data from bucket: %s, key: %s", bucket, key)
-    fn = f"{base_dir}/data/abalone-dataset.csv"
-    s3 = boto3.resource("s3")
-    s3.Bucket(bucket).download_file(key, fn)
 
     logger.debug("Reading downloaded data.")
-    df = pd.read_csv(
-        fn,
-        header=None,
-        names=feature_columns_names + [label_column],
-        dtype=merge_two_dicts(feature_columns_dtype, label_column_dtype),
-    )
-    os.unlink(fn)
+    df = pd.read_parquet("/opt/ml/processing/input/data")
 
+    df.drop_duplicates(subset=["processed_timestamp","type_id"], inplace=True)
+    df["prev_price"] = df.groupby("type_id").shift(1)["average_price"]
+
+    date_time = pd.to_datetime(df.pop('processed_timestamp'), format='%Y-%m-%d %H:%M:%S').drop_duplicates()
+
+    feature_columns_dtype = {
+        "adjusted_price": np.float64,
+        "average_price": np.float64,
+        "type_id": str,
+        "hour": np.float64,
+        "month": str,
+        "day" : str,
+    }
+
+    df = df.astype(feature_columns_dtype)
+    
     logger.debug("Defining transformers.")
-    numeric_features = list(feature_columns_names)
-    numeric_features.remove("sex")
-    numeric_transformer = Pipeline(
-        steps=[("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]
-    )
-
-    categorical_features = ["sex"]
-    categorical_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="constant", fill_value="missing")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        
+    numeric_features = [
+        "prev_price",
         ]
-    )
+
+    numeric_transformer = Pipeline(
+            steps=[("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler())]
+        )
+    
+    categorical_features = ["type_id"]
+
+    categorical_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="constant")),
+        ("onehot", OrdinalEncoder()),
+    ]
+)
 
     preprocess = ColumnTransformer(
         transformers=[
@@ -102,7 +71,7 @@ if __name__ == "__main__":
     )
 
     logger.info("Applying transforms.")
-    y = df.pop("rings")
+    y = df.pop("average_price")
     X_pre = preprocess.fit_transform(df)
     y_pre = y.to_numpy().reshape(len(y), 1)
 

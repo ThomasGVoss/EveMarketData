@@ -10,19 +10,21 @@ Implements a get_pipeline(**kwargs) method.
 """
 
 import os
+import uuid
 
 import boto3
+import logging
 import sagemaker
 import sagemaker.session
 from datetime import datetime
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
-from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
+from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor, FrameworkProcessor
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo
-from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.functions import JsonGet, Join
 from sagemaker.workflow.parameters import ParameterInteger, ParameterString
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.properties import PropertyFile
@@ -30,6 +32,7 @@ from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+logger = logging.getLogger(__name__)
 
 def get_sagemaker_client(region):
      """Gets the sagemaker client.
@@ -110,21 +113,14 @@ def get_pipeline(
     date = now.strftime("%Y-%m-%d--%H-%M-%S")
     pipeline_run_id = str(uuid.uuid4())[:8]
     output_destination = f"s3://{pipeline_bucket}/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
-    metadata_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/metadata/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
-    model_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/models/{pipeline_name}"
+    # metadata_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/metadata/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
+    # model_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/models/{pipeline_name}"
 
     # output_inference_result_bucket = output_inference_result_bucket_arn.split(":::")[1]
     # output_training_result_path = f"s3://{output_inference_result_bucket}/training/{branch_prefix}/{pipeline_name}/{day}/{pipeline_name}--{date}--{pipeline_run_id}"
-
-    # Versions
-    sklearn_framework_version = "1.2-1"
-    xgboost_framework_version = "1.7-1"
   
-    logger.debug(f"Model name:  {model_name}")
     logger.debug(f"Output destination:  {output_destination}")
-    logger.debug(f"Metadata path:  {metadata_path}")
-    logger.debug(f"Output training:  {output_training_result_path}")
-    logger.debug(f"Sagemaker version: {sagemaker.__version__}")
+    # logger.debug(f"Sagemaker version: {sagemaker.__version__}")
   
     # parameters for pipeline execution
     processing_instance_count = ParameterInteger(name="ProcessingInstanceCount", default_value=1)
@@ -137,83 +133,24 @@ def get_pipeline(
     model_approval_status = ParameterString(
         name="ModelApprovalStatus", default_value="Approved"
     )
-    input_data = ParameterString(
-        name="InputDataUrl",
-        default_value=f"s3://sagemaker-servicecatalog-seedcode-{region}/dataset/abalone-dataset.csv",
-    )
 
     # Create timestamp for unique paths
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
     # Upload the preprocessing script to S3
-    preprocessing_code_prefix = f"{base_job_prefix}/{timestamp}/processing_code"
+    preprocessing_code_prefix = "processing_code"
     preprocessing_code_s3_uri = sagemaker_session.upload_data(
         path="pipelines/abalone/preprocess.py",
-        bucket=default_bucket,
-        key_prefix=preprocessing_code_prefix
+        bucket=pipeline_bucket,
+        key_prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/{preprocessing_code_prefix}"
     )
 
     #Upload the evaluation script to S3
-    evaluation_code_prefix = f"{base_job_prefix}/{timestamp}/evaluation_code"
+    evaluation_code_prefix = "evaluation_code"
     evaluation_code_s3_uri = sagemaker_session.upload_data(
         path="pipelines/abalone/evaluate.py",
-        bucket=default_bucket,
-        key_prefix=evaluation_code_prefix
-    )
-
-    # ---------- 1. Split Vessel Rotation Dataset  --------
-    splitting_job_name = f"splitting--{date}"
-    
-    sklearn_preprocessing = FrameworkProcessor(
-        role=role,
-        estimator_cls=SKLearnClass,
-        framework_version=sklearn_framework_version,
-        instance_count=1,
-        instance_type=splitting_instance_type,
-        sagemaker_session=sagemaker_session,
-        code_location=output_destination,
-        env={
-            "min_train_date": min_train_date,
-            "train_val_split_date": train_val_split_date,
-            "val_test_split_date": val_test_split_date,
-            "max_test_date": max_test_date,
-            "project_name": "combined",
-        },
-    )
-    
-    step_args = sklearn_preprocessing.run(
-        job_name=splitting_job_name,
-        code="combined_model/training/pipeline_scripts/splitting/main.py",
-        source_dir="../../../src",
-        inputs=[
-            ProcessingInput(
-                source=input_vessel_rotation,
-                destination="/opt/ml/processing/input/data/",
-                s3_data_type="S3Prefix",
-                s3_input_mode="File",
-            ),
-        ],
-        outputs=[
-            ProcessingOutput(
-                output_name="split",
-                source="/opt/ml/processing/output/split",
-                destination=Join(
-                    on="/",
-                    values=[
-                        output_destination,
-                        splitting_job_name,
-                        "output",
-                        "split",
-                    ],
-                ),
-            )
-        ],
-    )
-    
-    step_split = ProcessingStep(
-        name=f"{project_name}-splitting",
-        step_args=step_args,
-        cache_config=cache_config,
+        bucket=pipeline_bucket,
+        key_prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/{evaluation_code_prefix}"
     )
 
     # processing step for feature engineering
@@ -225,23 +162,39 @@ def get_pipeline(
         sagemaker_session=sagemaker_session,
         role=role,
     )
-    # I dislike the ProcessingOutput destination. I think i'll have to find a way to pass the timestamp to the processing step.
     step_process = ProcessingStep(
         name="PreprocessAbaloneData",
         processor=sklearn_processor,
+        inputs=[
+        ProcessingInput(
+            input_name='data',
+            source=f's3://market-data-dev-142571790518/processed/market_prices/',
+            destination='/opt/ml/processing/input/data')
+        ],
         outputs=[
             ProcessingOutput(output_name="train", 
                              source="/opt/ml/processing/train",
-                             destination=f"{timestamp}/train"),
+                             destination=Join(
+                                 on="/",
+                                 values=[
+                                     output_destination,
+                                     "train"])),
             ProcessingOutput(output_name="validation", 
                              source="/opt/ml/processing/validation",
-                             destination=f"{timestamp}/validation"),
+                             destination=Join(
+                                 on="/",
+                                 values=[
+                                     output_destination,
+                                     "validation"])),
             ProcessingOutput(output_name="test", 
                              source="/opt/ml/processing/test",
-                             destination=f"{timestamp}/test"),
+                             destination=Join(
+                                 on="/",
+                                 values=[
+                                     output_destination,
+                                     "test"])),
         ],
-        code=preprocessing_code_s3_uri,
-        job_arguments=["--input-data", input_data],
+        code=preprocessing_code_s3_uri
     )
 
     # training step for generating model artifacts
@@ -325,7 +278,13 @@ def get_pipeline(
             ),
         ],
         outputs=[
-            ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/evaluation", destination=f"{timestamp}/evaluation"),
+            ProcessingOutput(output_name="evaluation", 
+                    source="/opt/ml/processing/evaluation",
+                    destination=Join(
+                        on="/",
+                        values=[
+                            output_destination,
+                            "evaluation"])),
         ],
         code=evaluation_code_s3_uri,
         property_files=[evaluation_report],
@@ -377,7 +336,6 @@ def get_pipeline(
             processing_instance_count,
             training_instance_type,
             model_approval_status,
-            input_data,
         ],
         steps=[step_process, 
                step_train,

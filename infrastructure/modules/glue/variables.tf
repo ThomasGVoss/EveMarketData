@@ -14,6 +14,12 @@ variable "crawler_schedule" {
   default     = "cron(0 */12 * * ? *)"  # Läuft alle 12 Stunden
 }
 
+variable "job_schedule" {
+  description = "Cron expression for the Glue Job schedule"
+  type        = string
+  default     = "cron(0 0 */5 * ? *)"  # Every 5 days at midnight UTC
+}
+
 variable "tags" {
   description = "A map of tags to assign to resources"
   type        = map(string)

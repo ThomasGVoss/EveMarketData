@@ -65,6 +65,64 @@ resource "aws_glue_crawler" "market_orders_crawler" {
   tags = var.tags
 }
 
+###########################
+# Glue Scripts
+###########################
+
+# Upload Glue processing script to S3
+resource "aws_s3_object" "processing_script" {
+  bucket = var.s3_bucket_name
+  key    = "scripts/processing_script.py"
+  source = "${path.module}/scripts/processing_script.py"
+  etag   = filemd5("${path.module}/scripts/processing_script.py")
+}
+
+###########################
+# Glue Jobs
+###########################
+
+resource "aws_glue_job" "market_prices_processing" {
+  name     = "market-prices-processing-${var.environment}"
+  role_arn = aws_iam_role.glue_role.arn
+  
+  command {
+    name            = "glueetl"
+    script_location = "s3://${var.s3_bucket_name}/scripts/processing_script.py"
+    python_version  = "3"
+  }
+  
+  default_arguments = {
+    "--job-language"        = "python"
+    "--database_name"       = aws_glue_catalog_database.market_data_database.name
+    "--s3_bucket_name"      = var.s3_bucket_name
+    "--TempDir"             = "s3://${var.s3_bucket_name}/temp/"
+    "--job-bookmark-option" = "job-bookmark-enable"
+    "--enable-metrics"      = ""
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-auto-scaling" = "true"
+    "--find_latest_partition" = "true"
+    "--use_specific_partition" = "false"
+  }
+  
+  execution_property {
+    max_concurrent_runs = 1
+  }
+  
+  # Use Flex execution type with auto-scaling
+  glue_version = "4.0"
+  worker_type  = "G.1X" # Flex type starting at 2 DPU
+  number_of_workers = 2
+  
+  # Auto-scaling configuration
+  execution_class = "FLEX"
+  
+  timeout     = 60
+  
+  tags = var.tags
+
+  # Ensure the script is uploaded before creating the job
+  depends_on = [aws_s3_object.processing_script]
+}
 
 ###########################
 # IAM Role for Glue
@@ -123,4 +181,17 @@ resource "aws_iam_policy" "glue_s3_access" {
 resource "aws_iam_role_policy_attachment" "glue_s3_access" {
   role       = aws_iam_role.glue_role.name
   policy_arn = aws_iam_policy.glue_s3_access.arn
+}
+
+# Glue Trigger to run job every 5 days
+resource "aws_glue_trigger" "market_prices_processing_trigger" {
+  name          = "market-prices-processing-trigger-${var.environment}"
+  type          = "SCHEDULED"
+  schedule      = var.job_schedule
+  
+  actions {
+    job_name    = aws_glue_job.market_prices_processing.name
+  }
+  
+  tags = var.tags
 }

@@ -103,6 +103,8 @@ resource "aws_iam_role_policy" "s3_access" {
         Resource = [
           "${var.s3_bucket_arn}",
           "${var.s3_bucket_arn}/*",
+          "arn:aws:s3:::market-data-dev-${var.account_id}",
+          "arn:aws:s3:::market-data-dev-${var.account_id}/*",
           "arn:aws:s3:::sagemaker-eu-central-1-${var.account_id}",
           "arn:aws:s3:::sagemaker-eu-central-1-${var.account_id}/*"
         ]
