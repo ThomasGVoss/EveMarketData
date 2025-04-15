@@ -47,3 +47,19 @@ output "sagemaker_bucket_arn" {
   description = "ARN of the S3 bucket created for SageMaker"
   value       = module.sagemaker_bucket.bucket_arn
 }
+
+# Streamlit outputs
+output "streamlit_ecr_repository_url" {
+  description = "The URL of the ECR repository for the Streamlit app"
+  value       = module.streamlit_ecr.repository_url
+}
+
+output "streamlit_alb_dns_name" {
+  description = "The DNS name of the ALB for the Streamlit app"
+  value       = module.streamlit_alb.alb_dns_name
+}
+
+output "streamlit_ecs_cluster_name" {
+  description = "The name of the ECS cluster for the Streamlit app"
+  value       = module.streamlit_ecs.cluster_id
+}

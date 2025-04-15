@@ -122,9 +122,10 @@ module "sagemaker_domain" {
 module "market_data_glue" {
   source = "../../modules/glue"
 
-  environment    = var.environment
-  s3_bucket_name = module.market_data_bucket.bucket_id
-  crawler_schedule = "cron(0 0/23 * * ? *)"  # Läuft alle 12 Stunden (um 0:00, 12:00 Uhr)
+  environment     = var.environment
+  s3_bucket_name  = module.market_data_bucket.bucket_id
+  crawler_schedule = "cron(0 0 */2 * ? *)"  # 
+  job_schedule    = "cron(0 0 */5 * ? *)"    # 
   
   tags = {
     Environment = var.environment
