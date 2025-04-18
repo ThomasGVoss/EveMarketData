@@ -22,17 +22,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("Made with ❤️ by Thomas")
 
-# Main content
-tab1, tab2 = st.tabs(["Market Overview", "Predictions"])
-
-with tab1:
-    st.header("Market Overview")
-    st.info("Market data visualization will be added here.")
-    
-with tab2:
-    st.header("Price Predictions")
-    st.info("Prediction interface will be added here.")
-
 # Footer
 st.markdown("---")
 st.markdown("Data is updated daily from EVE Online's ESI.")
