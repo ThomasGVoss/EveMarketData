@@ -29,3 +29,9 @@ variable "certificate_arn" {
   type        = string
   default     = null
 }
+
+variable "tags" {
+  description = "A map of tags to assign to resources"
+  type        = map(string)
+  default     = {}
+}

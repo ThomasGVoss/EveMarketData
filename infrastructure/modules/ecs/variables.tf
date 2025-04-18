@@ -70,14 +70,27 @@ variable "alb_security_group_id" {
 
 variable "environment_variables" {
   description = "Environment variables for the container"
-  type        = list(object({
+  type = list(object({
     name  = string
     value = string
   }))
-  default     = []
+  default = []
 }
 
 variable "alb_listener_arn" {
   description = "ARN of the ALB listener"
   type        = string
+}
+
+
+variable "tags" {
+  description = "A map of tags to assign to resources"
+  type        = map(string)
+  default     = {}
+}
+
+variable "s3_bucket_name" {
+  description = "The name of the S3 bucket the ECS task needs access to"
+  type        = string
+  default     = "market-data-dev-142571790518"
 }

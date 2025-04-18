@@ -91,7 +91,7 @@ variable "kernel_gateway_instance_type" {
   description = "Instance type for KernelGateway applications"
   type        = string
   default     = "ml.t3.medium"
-} 
+}
 
 variable "account_id" {
   description = "AWS account ID"

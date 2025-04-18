@@ -5,12 +5,12 @@ resource "aws_sagemaker_domain" "domain" {
   subnet_ids              = var.subnet_ids
   kms_key_id              = var.kms_key_id
   app_network_access_type = var.app_network_access_type
-  
+
   default_user_settings {
     execution_role = aws_iam_role.sagemaker_execution_role.arn
-    
+
     security_groups = concat(
-      [aws_security_group.sagemaker_sg.id], 
+      [aws_security_group.sagemaker_sg.id],
       var.additional_security_group_ids
     )
 
@@ -56,7 +56,7 @@ resource "aws_security_group" "sagemaker_sg" {
 # SageMaker execution role
 resource "aws_iam_role" "sagemaker_execution_role" {
   name = "${var.domain_name}-sagemaker-execution-role"
-  
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

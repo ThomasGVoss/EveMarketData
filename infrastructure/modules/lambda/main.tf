@@ -2,15 +2,15 @@ resource "aws_lambda_function" "lambda_function" {
   function_name = "${var.function_name}-${var.environment}"
   handler       = var.handler
   runtime       = var.runtime
-  
+
   role = aws_iam_role.lambda_role.arn
-  
+
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  
+
   timeout     = var.timeout
   memory_size = var.memory_size
-  
+
   environment {
     variables = merge(
       {
@@ -19,7 +19,7 @@ resource "aws_lambda_function" "lambda_function" {
       var.additional_environment_variables
     )
   }
-  
+
   tags = var.tags
 }
 
@@ -31,7 +31,7 @@ data "archive_file" "lambda_zip" {
 
 resource "aws_iam_role" "lambda_role" {
   name = "${var.function_name}-role-${var.environment}"
-  
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -44,14 +44,14 @@ resource "aws_iam_role" "lambda_role" {
       }
     ]
   })
-  
+
   tags = var.tags
 }
 
 resource "aws_iam_policy" "lambda_policy" {
   name        = "${var.function_name}-policy-${var.environment}"
   description = "Policy for ${var.function_name} Lambda function"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

@@ -46,7 +46,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption
 
 resource "aws_s3_bucket_versioning" "bucket_versioning" {
   bucket = aws_s3_bucket.bucket.id
-  
+
   versioning_configuration {
     status = var.enable_versioning ? "Enabled" : "Disabled"
   }
@@ -64,7 +64,7 @@ resource "aws_s3_bucket_public_access_block" "bucket_public_access_block" {
 # Create top-level folders if specified
 resource "aws_s3_object" "folders" {
   for_each = toset(var.create_folders)
-  
+
   bucket  = aws_s3_bucket.bucket.id
   key     = "${each.value}/"
   content = ""

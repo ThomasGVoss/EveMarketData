@@ -1,6 +1,6 @@
 resource "aws_sagemaker_user_profile" "default_user" {
-  count          = var.create_default_user_profile ? 1 : 0
-  domain_id      = aws_sagemaker_domain.domain.id
+  count             = var.create_default_user_profile ? 1 : 0
+  domain_id         = aws_sagemaker_domain.domain.id
   user_profile_name = var.default_user_profile_name
 
   user_settings {
