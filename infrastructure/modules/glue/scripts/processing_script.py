@@ -46,6 +46,8 @@ s3_client = boto3.client('s3')
 # Raw data path prefix and processed data path
 raw_data_path = f"s3://{bucket_name}/raw/api-data/prices/"
 processed_data_path = f"s3://{bucket_name}/processed/market_prices/"
+# New path for aggregated data
+aggregated_data_path = f"s3://{bucket_name}/aggregated/market_prices/"
 
 # Check if source data exists
 try:
@@ -204,6 +206,92 @@ logger.info(f"Writing processed data to {processed_data_path}")
 df.write.mode("overwrite").partitionBy("year", "month", "day", "hour").parquet(processed_data_path)
 
 logger.info(f"Processing complete. Data written to {processed_data_path}")
+
+# -------------------- START OF AGGREGATION SECTION --------------------
+logger.info("Starting aggregation across multiple days for plotting")
+
+try:
+    # Read all processed parquet files from the processed directory
+    logger.info(f"Reading processed parquet files from {processed_data_path}")
+    
+    # Create dynamic frame from processed data path
+    dynamic_frame = glueContext.create_dynamic_frame.from_options(
+        connection_type="s3",
+        connection_options={"paths": [processed_data_path], "recurse": True},
+        format="parquet"
+    )
+    
+    # Convert to Spark DataFrame for easier manipulation
+    aggregation_df = dynamic_frame.toDF()
+    
+    # Check if the dataframe is empty
+    if aggregation_df.count() == 0:
+        logger.info("No data found for aggregation. Skipping aggregation step.")
+    else:
+        # Log the count and schema of the aggregation dataframe
+        logger.info(f"Read {aggregation_df.count()} records for aggregation")
+        logger.info(f"Aggregation DataFrame Schema: {aggregation_df.schema}")
+        
+        # Convert processed_timestamp to timestamp type if it's a string
+        if "processed_timestamp" in aggregation_df.columns:
+            aggregation_df = aggregation_df.withColumn(
+                "processed_timestamp", 
+                F.to_timestamp("processed_timestamp")
+            )
+        
+        # Extract date from timestamp for daily aggregation
+        aggregation_df = aggregation_df.withColumn(
+            "date", 
+            F.to_date("processed_timestamp")
+        )
+        
+        # Aggregate by type_id and date
+        # Assuming type_id identifies the product and we want daily price trends
+        if "type_id" in aggregation_df.columns and "adjusted_price" in aggregation_df.columns:
+            logger.info("Performing aggregation by type_id and date")
+            
+            # Daily aggregation
+            daily_agg_df = aggregation_df.groupBy("type_id", "date").agg(
+                F.avg("adjusted_price").alias("avg_daily_price"),
+                F.min("adjusted_price").alias("min_daily_price"),
+                F.max("adjusted_price").alias("max_daily_price"),
+                F.count("*").alias("record_count")
+            )
+            
+            # Log counts
+            logger.info(f"Aggregated to {daily_agg_df.count()} daily records")
+            
+            # Combine original data with aggregated data
+            logger.info("Combining original data with aggregated data")
+            combined_df = aggregation_df.join(
+                daily_agg_df,
+                on=["type_id", "date"],
+                how="left"
+            )
+            
+            # Write the combined data to a new location
+            logger.info(f"Writing combined data to {aggregated_data_path}")
+            
+            # Convert to dynamic frame for writing
+            combined_dynamic_frame = DynamicFrame.fromDF(combined_df, glueContext, "combined_dynamic_frame")
+            
+            # Write to S3
+            glueContext.write_dynamic_frame.from_options(
+                frame=combined_dynamic_frame,
+                connection_type="s3",
+                connection_options={"path": aggregated_data_path, "partitionKeys": []},
+                format="parquet"
+            )
+            
+            logger.info(f"Aggregation complete. Combined data written to {aggregated_data_path}")
+        else:
+            logger.warning("Required columns (type_id or adjusted_price) not found. Skipping aggregation.")
+            
+except Exception as e:
+    logger.error(f"Error during aggregation process: {str(e)}")
+    # Continue with job instead of exiting, so the primary functionality is not affected
+    logger.info("Continuing with job despite aggregation error")
+
 
 # End the job
 job.commit()
