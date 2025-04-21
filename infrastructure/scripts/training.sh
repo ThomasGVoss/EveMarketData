@@ -11,9 +11,9 @@ echo "SageMaker Project Name ID: $SAGEMAKER_PROJECT_NAME_ID"
 # jump to the dev env. directory
 pushd infrastructure/environments/dev
 # get the pipeline role arn from terraform output
-export SAGEMAKER_PIPELINE_ROLE_ARN=$(terraform output -raw sagemaker_execution_role_arn)
+export SAGEMAKER_PIPELINE_ROLE_ARN=$(terraform output -json analytics_outputs | jq -r '.sagemaker_execution_role_arn')
 #get the default bucket from terraform output
-export BUCKET_NAME=$(terraform output -raw sagemaker_bucket)
+export BUCKET_NAME=$(terraform output -json analytics_outputs | jq -r '.sagemaker_bucket_name')
 popd
 
 source .venv/Scripts/activate
