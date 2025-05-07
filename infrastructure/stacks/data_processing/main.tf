@@ -5,7 +5,7 @@ module "market_prices_lambda" {
 
   function_name       = "market-data-prices-ingestion"
   handler             = "market_price_ingestion.lambda_handler"
-  source_dir          = "src/market_prices"
+  source_dir          = "market_prices"
   environment         = var.environment
   s3_bucket_name      = var.market_data_bucket_id
   schedule_expression = "rate(12 hours)"
@@ -21,15 +21,10 @@ module "market_orders_lambda" {
 
   function_name       = "market-data-orders-ingestion"
   handler             = "market_order_ingestion.lambda_handler"
-  source_dir          = "src/market_orders"
+  source_dir          = "market_orders"
   environment         = var.environment
   s3_bucket_name      = var.market_data_bucket_id
   schedule_expression = "rate(12 hours)"
-
-  additional_environment_variables = {
-    REGIONS  = "10000002,10000032,10000043,10000030"
-    TYPE_IDS = "17357,230,222,9957"
-  }
 
   tags = merge(var.tags, {
     Function = "Market Orders Ingestion"

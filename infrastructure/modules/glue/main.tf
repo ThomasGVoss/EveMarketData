@@ -70,11 +70,19 @@ resource "aws_glue_crawler" "market_orders_crawler" {
 ###########################
 
 # Upload Glue processing script to S3
-resource "aws_s3_object" "processing_script" {
+resource "aws_s3_object" "processing_script_prices" {
   bucket = var.s3_bucket_name
-  key    = "scripts/processing_script.py"
-  source = "${path.module}/scripts/processing_script.py"
-  etag   = filemd5("${path.module}/scripts/processing_script.py")
+  key    = "scripts/processing_script_prices.py"
+  source = "../../../src/data_retrieval/glue/scripts/processing_script_prices.py"
+  etag   = filemd5("../../../src/data_retrieval/glue/scripts/processing_script_prices.py")
+}
+
+# Upload Glue processing script for volumes to S3
+resource "aws_s3_object" "processing_script_volumes" {
+  bucket = var.s3_bucket_name
+  key    = "scripts/processing_script_volumes.py"
+  source = "../../../src/data_retrieval/glue/scripts/processing_script_volumes.py"
+  etag   = filemd5("../../../src/data_retrieval/glue/scripts/processing_script_volumes.py")
 }
 
 ###########################
@@ -87,7 +95,7 @@ resource "aws_glue_job" "market_prices_processing" {
 
   command {
     name            = "glueetl"
-    script_location = "s3://${var.s3_bucket_name}/scripts/processing_script.py"
+    script_location = "s3://${var.s3_bucket_name}/scripts/processing_script_prices.py"
     python_version  = "3"
   }
 
@@ -121,7 +129,46 @@ resource "aws_glue_job" "market_prices_processing" {
   tags = var.tags
 
   # Ensure the script is uploaded before creating the job
-  depends_on = [aws_s3_object.processing_script]
+  depends_on = [aws_s3_object.processing_script_prices]
+}
+
+resource "aws_glue_job" "order_volumes_processing" {
+  name     = "order-volumes-processing-${var.environment}"
+  role_arn = aws_iam_role.glue_role.arn
+
+  command {
+    name            = "glueetl"
+    script_location = "s3://${var.s3_bucket_name}/scripts/processing_script_volumes.py"
+    python_version  = "3"
+  }
+
+  default_arguments = {
+    "--job-language"                     = "python"
+    "--s3_bucket_name"                   = var.s3_bucket_name
+    "--TempDir"                          = "s3://${var.s3_bucket_name}/temp/"
+    "--enable-metrics"                   = ""
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-auto-scaling"              = "true"
+  }
+
+  execution_property {
+    max_concurrent_runs = 1
+  }
+
+  # Use Flex execution type with auto-scaling
+  glue_version      = "4.0"
+  worker_type       = "G.1X" # Flex type starting at 2 DPU
+  number_of_workers = 2
+
+  # Auto-scaling configuration
+  execution_class = "FLEX"
+
+  timeout = 60
+
+  tags = var.tags
+
+  # Ensure the script is uploaded before creating the job
+  depends_on = [aws_s3_object.processing_script_volumes]
 }
 
 ###########################
@@ -191,6 +238,22 @@ resource "aws_glue_trigger" "market_prices_processing_trigger" {
 
   actions {
     job_name = aws_glue_job.market_prices_processing.name
+  }
+
+  tags = var.tags
+}
+
+###########################
+# Glue Trigger for Order Volumes Job
+###########################
+
+resource "aws_glue_trigger" "order_volumes_processing_trigger" {
+  name     = "order-volumes-processing-trigger-${var.environment}"
+  type     = "SCHEDULED"
+  schedule = var.job_schedule
+
+  actions {
+    job_name = aws_glue_job.order_volumes_processing.name
   }
 
   tags = var.tags

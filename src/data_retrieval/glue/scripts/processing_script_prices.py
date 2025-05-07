@@ -25,15 +25,14 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 
 # Get job parameters
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'database_name', 's3_bucket_name'])
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 's3_bucket_name'])
 job.init(args['JOB_NAME'], args)
 
 # Set bucket and paths
 bucket_name = args.get('s3_bucket_name')
-database_name = args.get('database_name')
 
 # Log the job parameters
-logger.info(f"Job parameters: bucket_name={bucket_name}, database_name={database_name}")
+logger.info(f"Job parameters: bucket_name={bucket_name}")
 
 # Set Spark configuration for better performance
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -48,6 +47,37 @@ raw_data_path = f"s3://{bucket_name}/raw/api-data/prices/"
 processed_data_path = f"s3://{bucket_name}/processed/market_prices/"
 # New path for aggregated data
 aggregated_data_path = f"s3://{bucket_name}/aggregated/market_prices/"
+
+# Define the checkpoint path in S3
+checkpoint_path = "checkpoints/last_processed_partition.json"
+
+# Save the last processed partition
+def save_checkpoint(bucket_name, checkpoint_path, last_partition):
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=checkpoint_path,
+            Body=json.dumps(last_partition)
+        )
+        logger.info(f"Checkpoint saved: {last_partition}")
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint: {str(e)}")
+
+# Read the last processed partition from the checkpoint
+def read_checkpoint(bucket_name, checkpoint_path):
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=checkpoint_path)
+        checkpoint = json.loads(response['Body'].read().decode('utf-8'))
+        logger.info(f"Checkpoint loaded: {checkpoint}")
+        return checkpoint
+    except s3_client.exceptions.NoSuchKey:
+        logger.info("No checkpoint found. Starting from the beginning.")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to read checkpoint: {str(e)}")
+        return None
+
+## -------------------- START OF DATA PROCESSING SECTION --------------------
 
 # Check if source data exists
 try:
@@ -81,6 +111,19 @@ except Exception as e:
     logger.error(f"Error checking for files: {str(e)}")
     job.commit()
     sys.exit(1)
+
+# Read the checkpoint
+last_partition = read_checkpoint(bucket_name, checkpoint_path)
+
+# Filter folders based on the checkpoint
+if last_partition:
+    logger.info(f"Filtering folders starting from partition: {last_partition}")
+    s3_folders = [
+        folder for folder in s3_folders
+        if folder >= f"raw/api-data/prices/year={last_partition['year']}/month={last_partition['month']}/day={last_partition['day']}/hour={last_partition['hour']}"
+    ]
+else:
+    logger.info("Processing all folders as no checkpoint exists.")
 
 # Function to extract date from path with the specific format
 def extract_date_from_path(path):
@@ -133,12 +176,7 @@ for folder_path in s3_folders:
     try:
         # Read data from this specific folder
         folder_df = spark.read.json(full_path)
-        
-        # If df is empty or has no rows, continue to next folder
-        if folder_df.count() == 0:
-            logger.info(f"No data found in {folder_path}, skipping")
-            continue
-            
+                   
         # Add timestamp and partition columns based on folder path
         folder_df = folder_df.withColumn("processed_timestamp", F.lit(date_info["timestamp"]))
         folder_df = folder_df.withColumn("year", F.lit(date_info["year"]))
@@ -146,9 +184,6 @@ for folder_path in s3_folders:
         folder_df = folder_df.withColumn("day", F.lit(date_info["day"]))
         folder_df = folder_df.withColumn("hour", F.lit(date_info["hour"]))
         folder_df = folder_df.withColumn("source_path", F.lit(folder_path))
-        
-        # Log info about this folder's data
-        logger.info(f"Folder {folder_path}: {folder_df.count()} rows with timestamp {date_info['timestamp']}")
         
         # Add this dataframe to our list
         dataframes.append(folder_df)
@@ -168,22 +203,14 @@ df = dataframes[0]
 for additional_df in dataframes[1:]:
     df = df.unionByName(additional_df, allowMissingColumns=True)
 
-# Log the combined dataframe info
-logger.info(f"Combined dataframe has {df.count()} rows")
-
 # If df has nested arrays (common when reading directly from JSON files)
 if "items" in df.columns:
-    logger.info("Found 'items' column in data, exploding nested array")
     # Assume items is an array column containing the market data records
     nested_df = df.select(
         "processed_timestamp", "year", "month", "day", "hour", "source_path",
         F.explode(F.col("items")).alias("item")
     )
     df = nested_df.select("processed_timestamp", "year", "month", "day", "hour", "source_path", "item.*")
-    # Recount after explosion
-    count = df.count()
-    logger.info(f"After exploding arrays: {count} records")
-
 
 # Check data types for adjusted_price, average_price, and type_id
 logger.info("Checking data types of critical columns:")
@@ -205,93 +232,16 @@ if "type_id" in df.columns:
 logger.info(f"Writing processed data to {processed_data_path}")
 df.write.mode("overwrite").partitionBy("year", "month", "day", "hour").parquet(processed_data_path)
 
-logger.info(f"Processing complete. Data written to {processed_data_path}")
+# Determine the last processed partition
+last_processed_partition = {
+    "year": max(df.select("year").distinct().rdd.flatMap(lambda x: x).collect()),
+    "month": max(df.select("month").distinct().rdd.flatMap(lambda x: x).collect()),
+    "day": max(df.select("day").distinct().rdd.flatMap(lambda x: x).collect()),
+    "hour": max(df.select("hour").distinct().rdd.flatMap(lambda x: x).collect())
+}
 
-# -------------------- START OF AGGREGATION SECTION --------------------
-logger.info("Starting aggregation across multiple days for plotting")
-
-try:
-    # Read all processed parquet files from the processed directory
-    logger.info(f"Reading processed parquet files from {processed_data_path}")
-    
-    # Create dynamic frame from processed data path
-    dynamic_frame = glueContext.create_dynamic_frame.from_options(
-        connection_type="s3",
-        connection_options={"paths": [processed_data_path], "recurse": True},
-        format="parquet"
-    )
-    
-    # Convert to Spark DataFrame for easier manipulation
-    aggregation_df = dynamic_frame.toDF()
-    
-    # Check if the dataframe is empty
-    if aggregation_df.count() == 0:
-        logger.info("No data found for aggregation. Skipping aggregation step.")
-    else:
-        # Log the count and schema of the aggregation dataframe
-        logger.info(f"Read {aggregation_df.count()} records for aggregation")
-        logger.info(f"Aggregation DataFrame Schema: {aggregation_df.schema}")
-        
-        # Convert processed_timestamp to timestamp type if it's a string
-        if "processed_timestamp" in aggregation_df.columns:
-            aggregation_df = aggregation_df.withColumn(
-                "processed_timestamp", 
-                F.to_timestamp("processed_timestamp")
-            )
-        
-        # Extract date from timestamp for daily aggregation
-        aggregation_df = aggregation_df.withColumn(
-            "date", 
-            F.to_date("processed_timestamp")
-        )
-        
-        # Aggregate by type_id and date
-        # Assuming type_id identifies the product and we want daily price trends
-        if "type_id" in aggregation_df.columns and "adjusted_price" in aggregation_df.columns:
-            logger.info("Performing aggregation by type_id and date")
-            
-            # Daily aggregation
-            daily_agg_df = aggregation_df.groupBy("type_id", "date").agg(
-                F.avg("adjusted_price").alias("avg_daily_price"),
-                F.min("adjusted_price").alias("min_daily_price"),
-                F.max("adjusted_price").alias("max_daily_price"),
-                F.count("*").alias("record_count")
-            )
-            
-            # Log counts
-            logger.info(f"Aggregated to {daily_agg_df.count()} daily records")
-            
-            # Combine original data with aggregated data
-            logger.info("Combining original data with aggregated data")
-            combined_df = aggregation_df.join(
-                daily_agg_df,
-                on=["type_id", "date"],
-                how="left"
-            )
-            
-            # Write the combined data to a new location
-            logger.info(f"Writing combined data to {aggregated_data_path}")
-            
-            # Convert to dynamic frame for writing
-            combined_dynamic_frame = DynamicFrame.fromDF(combined_df, glueContext, "combined_dynamic_frame")
-            
-            # Write to S3
-            glueContext.write_dynamic_frame.from_options(
-                frame=combined_dynamic_frame,
-                connection_type="s3",
-                connection_options={"path": aggregated_data_path, "partitionKeys": []},
-                format="parquet"
-            )
-            
-            logger.info(f"Aggregation complete. Combined data written to {aggregated_data_path}")
-        else:
-            logger.warning("Required columns (type_id or adjusted_price) not found. Skipping aggregation.")
-            
-except Exception as e:
-    logger.error(f"Error during aggregation process: {str(e)}")
-    # Continue with job instead of exiting, so the primary functionality is not affected
-    logger.info("Continuing with job despite aggregation error")
-
+# Save the checkpoint
+save_checkpoint(bucket_name, checkpoint_path, last_processed_partition)
 
 # End the job
 job.commit()
