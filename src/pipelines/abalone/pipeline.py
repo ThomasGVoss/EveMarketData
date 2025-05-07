@@ -17,16 +17,21 @@ import logging
 import sagemaker
 import sagemaker.session
 from datetime import datetime
+from sagemaker import PipelineModel
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
+from sagemaker.model import Model
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
 from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor, FrameworkProcessor
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.workflow.condition_step import ConditionStep
-from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo
+from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo, ConditionGreaterThanOrEqualTo
 from sagemaker.workflow.functions import JsonGet, Join
+from sagemaker.workflow.steps import CacheConfig
+from sagemaker.workflow.model_step import ModelStep
 from sagemaker.workflow.parameters import ParameterInteger, ParameterString
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.properties import PropertyFile
 from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
@@ -113,12 +118,7 @@ def get_pipeline(
     date = now.strftime("%Y-%m-%d--%H-%M-%S")
     pipeline_run_id = str(uuid.uuid4())[:8]
     output_destination = f"s3://{pipeline_bucket}/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
-    # metadata_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/metadata/{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}"
-    # model_path = f"s3://{model_artifacts_bucket}/{branch_prefix}/models/{pipeline_name}"
-
-    # output_inference_result_bucket = output_inference_result_bucket_arn.split(":::")[1]
-    # output_training_result_path = f"s3://{output_inference_result_bucket}/training/{branch_prefix}/{pipeline_name}/{day}/{pipeline_name}--{date}--{pipeline_run_id}"
-  
+    
     logger.debug(f"Output destination:  {output_destination}")
     # logger.debug(f"Sagemaker version: {sagemaker.__version__}")
   
@@ -136,6 +136,8 @@ def get_pipeline(
 
     # Create timestamp for unique paths
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+    cache_config = CacheConfig(enable_caching=True, expire_after="PT1H")
 
     # Upload the preprocessing script to S3
     preprocessing_code_prefix = "processing_code"
@@ -193,12 +195,20 @@ def get_pipeline(
                                  values=[
                                      output_destination,
                                      "test"])),
+            ProcessingOutput(output_name="encoder", 
+                             source="/opt/ml/processing/encoder",
+                             destination=Join(
+                                 on="/",
+                                 values=[
+                                     output_destination,
+                                     "encoder"])),
         ],
-        code=preprocessing_code_s3_uri
+        code=preprocessing_code_s3_uri,
+        cache_config=cache_config
     )
 
     # training step for generating model artifacts
-    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/{timestamp}/AbaloneTrain"
+    model_path = f"{output_destination}/modelArtifacts"
     image_uri = sagemaker.image_uris.retrieve(
         framework="xgboost",
         region=region,
@@ -206,6 +216,7 @@ def get_pipeline(
         py_version="py3",
         instance_type=training_instance_type,
     )
+
     xgb_train = Estimator(
         image_uri=image_uri,
         instance_type=training_instance_type,
@@ -219,11 +230,11 @@ def get_pipeline(
         max_run=3600,   # 1 hour
     )
     xgb_train.set_hyperparameters(
-        objective="reg:linear",
-        num_round=50,
-        max_depth=5,
-        eta=0.2,
-        gamma=4,
+        objective="reg:squarederror",
+        num_round=500,
+        max_depth=10,
+        eta=0.3,
+        gamma=2,
         min_child_weight=6,
         subsample=0.7,
         silent=0,
@@ -245,6 +256,7 @@ def get_pipeline(
                 content_type="text/csv",
             ),
         },
+        cache_config=cache_config
     )
 
     # processing step for evaluation
@@ -290,45 +302,62 @@ def get_pipeline(
         property_files=[evaluation_report],
     )
 
-    # # register model step that will be conditionally executed
-    # model_metrics = ModelMetrics(
-    #     model_statistics=MetricsSource(
-    #         s3_uri="{}/evaluation.json".format(
-    #             step_eval.arguments["ProcessingOutputConfig"]["Outputs"][0]["S3Output"]["S3Uri"]
-    #         ),
-    #         content_type="application/json"
-    #     )
-    # )
-    # step_register = RegisterModel(
-    #     name="RegisterAbaloneModel",
-    #     estimator=xgb_train,
-    #     model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
-    #     content_types=["text/csv"],
-    #     response_types=["text/csv"],
-    #     inference_instances=["ml.t2.medium", "ml.m5.large"],
-    #     transform_instances=["ml.m5.large"],
-    #     model_package_group_name=model_package_group_name,
-    #     approval_status=model_approval_status,
-    #     model_metrics=model_metrics,
-    # )
+    ## model registration step
 
-    # # condition step for evaluating model quality and branching execution
-    # cond_lte = ConditionLessThanOrEqualTo(
-    #     left=JsonGet(
-    #         step_name=step_eval.name,
-    #         property_file=evaluation_report,
-    #         json_path="regression_metrics.mse.value"
-    #     ),
-    #     right=6.0,
-    # )
-    # step_cond = ConditionStep(
-    #     name="CheckMSEAbaloneEvaluation",
-    #     conditions=[cond_lte],
-    #     if_steps=[step_register],
-    #     else_steps=[],
-    # )
+    pipeline_session = PipelineSession()
+    
+    model = Model(
+        image_uri=image_uri,
+        model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+        sagemaker_session=pipeline_session,
+        role=role)
 
-    # pipeline instance
+    step_model_create = ModelStep(
+        name="MyModelCreationStep",
+        step_args=model.create(instance_type="ml.m5.xlarge"))
+    
+    cond_lte = ConditionGreaterThanOrEqualTo(
+        left=JsonGet(
+            step_name=step_eval.name,
+            property_file=evaluation_report,
+            json_path="regression_metrics.r2.value"
+        ),
+        right=0.90
+    )
+
+    step_cond = ConditionStep(
+        name="AbaloneMAECond",
+        conditions=[cond_lte],
+        if_steps=[step_model_create],
+        else_steps=[]
+    )
+
+    pipeline_model = PipelineModel(
+        models=[model],
+        role=role,
+        sagemaker_session=pipeline_session)
+    
+    register_model_step_args = pipeline_model.register(
+        # content_types=["application/json"],
+        # response_types=["application/json"],
+        # inference_instances=["ml.t2.medium", "ml.m5.xlarge"],
+        # transform_instances=["ml.m5.xlarge"],
+        content_types=["text/csv"],
+        response_types=["text/csv"],
+        inference_instances=["ml.t2.medium", "ml.m5.large"],
+        transform_instances=["ml.m5.large"],
+        model_package_group_name=model_package_group_name,
+        approval_status=model_approval_status,
+    )
+
+    step_model_registration = ModelStep(
+        name="AbaloneRegisterModel",
+        step_args=register_model_step_args,
+        depends_on=[step_model_create.name],)
+
+
+    ## pipeline definition ##
+
     pipeline = Pipeline(
         name=pipeline_name,
         parameters=[
@@ -339,7 +368,11 @@ def get_pipeline(
         ],
         steps=[step_process, 
                step_train,
-               step_eval],
+               step_eval,
+               step_cond,
+               step_model_registration
+               ],
         sagemaker_session=sagemaker_session,
     )
+
     return pipeline
