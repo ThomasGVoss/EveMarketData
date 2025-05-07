@@ -76,133 +76,93 @@ def load_parquet_files_from_s3(bucket, folder):
         st.error(f"Error loading data from S3: {str(e)}")
         return None
 
-# Sidebar for S3 data configuration
+
+# S3 bucket and folder inputs
+bucket_name = st.text_input(
+    "S3 Bucket Name", 
+    value="market-data-dev-142571790518"
+)
+
+# Sidebar for S3 data configuration and filters
 with st.sidebar:
-    st.header("Data Source Settings")
-    
-    bucket_name = st.text_input(
-        "S3 Bucket Name", 
-        value="market-data-dev-142571790518"
+    common_type_ids = set()
+
+    st.header("Filters")
+        
+    selected_type_ids = st.multiselect(
+        "Filter by Type ID",
+        options=list([ 1333, 2994, 34126, 32995, 34132, 34133]),  # Example type IDs
+        default=list([32995])  # Default to all type IDs
     )
-         
-    # Default folder path
-    default_folder = "aggregated/market_prices/"
-    
-    # Allow users to specify a folder
-    folder_path = st.text_input("S3 Folder Path", value=default_folder)
-    
-    load_button = st.button("Load Data")
 
-# Main content area
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
+if 'data_loaded' not in st.session_state or not st.session_state.data_loaded:
+    with st.spinner("Loading datasets from S3..."):
+        price_data = load_parquet_files_from_s3(bucket_name, "aggregated/market_prices/")
+        volumen_data = load_parquet_files_from_s3(bucket_name, "processed/order_volumes/")
 
-# Load data when button is clicked
-if load_button:
-    with st.spinner("Loading data from S3..."):
-        data = load_parquet_files_from_s3(bucket_name, folder_path)
-
-        if data is not None:
-            st.session_state.data = data
+        if price_data is not None and volumen_data is not None:
+            st.session_state.price_data = price_data
+            st.session_state.volumen_data = volumen_data
             st.session_state.data_loaded = True
         else:
-            st.error("Failed to load data. Please check the S3 path and bucket name.")
+            st.error("Failed to load one or both datasets. Please check the S3 paths and bucket name.")
 
 # Display data and visualizations if data is loaded
 if st.session_state.get('data_loaded', False):
-    data = st.session_state.data
+    price_data = st.session_state.price_data
+    volumen_data = st.session_state.volumen_data
+
+    # Apply Type ID filter
+    if selected_type_ids:
+        if 'type_id' in price_data.columns:
+            price_data = price_data[price_data['type_id'].isin(selected_type_ids)]
+        if 'type_id' in volumen_data.columns:
+            volumen_data = volumen_data[volumen_data['type_id'].isin(selected_type_ids)]
     
-    # Data overview
-    st.subheader("Data Overview")
-    st.write(f"Number of rows: {len(data)}")
-    st.write(f"Number of columns: {len(data.columns)}")
     
-    # Show data sample
-    with st.expander("Data Sample"):
-        st.dataframe(data.head(10))
+    # Data overview for Dataset 1
+    st.subheader("Dataset 1: Market Prices")
+    st.write(f"Number of rows: {len(price_data)}")
+    st.write(f"Number of columns: {len(price_data.columns)}")
+    with st.expander("Data Sample (Dataset 1)"):
+        st.dataframe(price_data.head(10))
     
-    # Show column information
-    with st.expander("Column Information"):
-        st.dataframe(pd.DataFrame({
-            'Column': data.columns,
-            'Type': data.dtypes,
-            'Non-Null Count': data.count(),
-            'Null Count': data.isna().sum()
-        }))
-    
-    # Add a filter for type_id
-    if 'type_id' in data.columns:
-        st.subheader("Filter by Type ID")
-        unique_type_ids = data['type_id'].unique().tolist()
-        selected_type_ids = st.multiselect(
-            "Select Type ID(s) to filter",
-            options=unique_type_ids,
-            default=[81901]  # Default to None
+    # Visualization for Dataset 1
+    st.subheader("Visualizations for Dataset 1")
+    price_data['processed_timestamp'] = pd.to_datetime(price_data['processed_timestamp'], errors='coerce')
+    price_data = price_data.sort_values(by='processed_timestamp')
+    if 'processed_timestamp' in price_data.columns and 'average_price' in price_data.columns:
+        fig_1 = px.line(
+            price_data, 
+            x='processed_timestamp', 
+            y='average_price', 
+            title="Average Price Over Time (Dataset 1)"
         )
-        
-        # Apply the filter
-        if selected_type_ids:
-            data = data[data['type_id'].isin(selected_type_ids)]
-    
-    # Visualization options
-    st.subheader("Visualizations")
-    
-# Allow user to select columns for visualization
-    numeric_cols = data.select_dtypes(include=['number']).columns.tolist()
-    categorical_cols = data.select_dtypes(exclude=['number']).columns.tolist()
-    
-    # Ensure 'type_id' is included in categorical columns
-    if 'type_id' in data.columns and 'type_id' not in categorical_cols:
-        categorical_cols.append('type_id')
-    
-    # Only show visualization options if we have data to visualize
-    if numeric_cols:
-
-        data['processed_timestamp'] = pd.to_datetime(data['processed_timestamp'], errors='coerce')
-        
-        # Sort data by processed_timestamp
-        data = data.sort_values(by='processed_timestamp')
-
-    # Fix col_x to processed_timestamp and col_y to average_price
-    col_x = 'processed_timestamp'
-    col_y = 'average_price'
-
-    if col_x in data.columns and col_y in data.columns:
-        group_by = st.selectbox("Group by (optional)", ["None"] + categorical_cols)
-        
-        if 'min_daily_price' in data.columns and 'max_daily_price' in data.columns:
-            # Create a line plot with a corridor for min and max daily prices
-            fig = px.line(data, x=col_x, y=col_y, color=group_by if group_by != "None" else None, title=f"{col_y} over {col_x}")
-            
-            # Add the min-max corridor
-            fig.add_traces([
-                go.Scatter(
-                    x=data[col_x],
-                    y=data['max_daily_price'],
-                    mode='lines',
-                    line=dict(width=0),
-                    showlegend=False,
-                    name='Max Price',
-                    hoverinfo='skip'
-                ),
-                go.Scatter(
-                    x=data[col_x],
-                    y=data['min_daily_price'],
-                    mode='lines',
-                    line=dict(width=0),
-                    fill='tonexty',
-                    fillcolor='rgba(0,100,200,0.2)',
-                    showlegend=True,
-                    name='Price Corridor'
-                )
-            ])
-        else:
-            # Create a standard line plot if min and max prices are not available
-            fig = px.line(data, x=col_x, y=col_y, color=group_by if group_by != "None" else None, title=f"{col_y} over {col_x}")
-        
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_1, use_container_width=True)
     else:
-        st.error(f"Columns '{col_x}' and/or '{col_y}' are not available in the data.")
+        st.error("Broken....")
+    
+        
+    # Data overview for Dataset 2
+    st.subheader("Dataset 2: Market Volumes")
+    st.write(f"Number of rows: {len(volumen_data)}")
+    st.write(f"Number of columns: {len(volumen_data.columns)}")
+    with st.expander("Data Sample (Dataset 2)"):
+        st.dataframe(volumen_data.head(10))
+
+    # Visualization for Dataset 2
+    st.subheader("Visualizations for Dataset 2")
+    if 'system_id' in volumen_data.columns and 'type_id' in volumen_data.columns:
+        fig_2 = px.histogram(
+            volumen_data, 
+            x='price', 
+            color='is_buy_order',
+            nbins=20,
+            title="Average Volume Over Time (Dataset 2)"
+        )
+        st.plotly_chart(fig_2, use_container_width=True)
+    else:
+        st.error("Broken....")
 
 # Footer
 st.markdown("---")
