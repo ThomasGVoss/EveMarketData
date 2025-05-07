@@ -1,3 +1,6 @@
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
 resource "aws_lambda_function" "lambda_function" {
   function_name = "${var.function_name}-${var.environment}"
   handler       = var.handler
@@ -25,8 +28,8 @@ resource "aws_lambda_function" "lambda_function" {
 
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/${var.source_dir}"
-  output_path = "${path.module}/${var.function_name}.zip"
+  source_dir  = "../../../src/data_retrieval/lambda_functions/${var.source_dir}"
+  output_path = "../../../src/data_retrieval/lambda_functions/${var.function_name}.zip"
 }
 
 resource "aws_iam_role" "lambda_role" {
@@ -75,6 +78,13 @@ resource "aws_iam_policy" "lambda_policy" {
           "logs:PutLogEvents"
         ]
         Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "lambda:InvokeFunction"
+        ]
+        Resource = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.function_name}-${var.environment}"
       }
     ]
   })
@@ -107,4 +117,4 @@ resource "aws_lambda_permission" "allow_cloudwatch" {
   function_name = aws_lambda_function.lambda_function.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.schedule[0].arn
-} 
+}
