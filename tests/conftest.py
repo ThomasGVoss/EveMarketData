@@ -2,6 +2,7 @@
 import pytest
 import boto3
 import sagemaker
+import pandas as pd
 from unittest.mock import MagicMock
 
 @pytest.fixture
@@ -43,3 +44,19 @@ def test_data():
         "shell_weight": [0.15, 0.07, 0.21, 0.155],
         "rings": [15, 7, 9, 10]
     }
+
+@pytest.fixture
+def load_preprocessing_data():
+
+    mock_data = pd.DataFrame({
+        "processed_timestamp": ["2025-04-19 12:00:00", "2025-04-19 13:00:00", "2025-04-19 14:00:00", "2025-04-19 15:00:00", "2025-04-19 16:00:00"],
+        "source_path" : ["a/b/x","a/b/y","a/b/z","a/b/x","a/b/y"],
+        "type_id": ["123", "123", "123", "123", "123"],
+        "average_price": [100.0, 200.0, 200.0, 300.0, 400.0],
+        "adjusted_price": [95.0, 190.0, 190.0, 285.0, 380.0],
+    })
+
+    input_url = "s3://market-data-dev-142571790518/aggregated/market_prices"
+    mock_data = pd.read_parquet(input_url)
+
+    return mock_data
