@@ -56,7 +56,7 @@ def load_preprocessing_data():
         "adjusted_price": [95.0, 190.0, 190.0, 285.0, 380.0],
     })
 
-    input_url = "s3://market-data-dev-142571790518/aggregated/market_prices"
+    input_url = "s3://market-data-dev-142571790518/processed/order_volumes/"
     mock_data = pd.read_parquet(input_url)
 
     return mock_data

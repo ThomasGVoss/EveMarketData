@@ -123,16 +123,14 @@ def get_pipeline(
     # logger.debug(f"Sagemaker version: {sagemaker.__version__}")
   
     # parameters for pipeline execution
-    processing_instance_count = ParameterInteger(name="ProcessingInstanceCount", default_value=1)
+    processing_instance_count = ParameterInteger(
+        name="ProcessingInstanceCount", default_value=1)
     processing_instance_type = ParameterString(
-        name="ProcessingInstanceType", default_value="ml.c4.xlarge"
-    )
+        name="ProcessingInstanceType", default_value="ml.c3.xlarge")
     training_instance_type = ParameterString(
-        name="TrainingInstanceType", default_value="ml.c4.xlarge"
-    )
+        name="TrainingInstanceType", default_value="ml.c3.xlarge")
     model_approval_status = ParameterString(
-        name="ModelApprovalStatus", default_value="Approved"
-    )
+        name="ModelApprovalStatus", default_value="Approved")
 
     # Create timestamp for unique paths
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -156,21 +154,21 @@ def get_pipeline(
     )
 
     # processing step for feature engineering
-    sklearn_processor = SKLearnProcessor(
-        framework_version="0.23-1",
+    script_processor = ScriptProcessor(
+        command = ["python3"],
+        image_uri= "142571790518.dkr.ecr.eu-central-1.amazonaws.com/script-processor:latest",
+        role=role,
         instance_type=processing_instance_type,
         instance_count=processing_instance_count,
-        base_job_name=f"{base_job_prefix}/sklearn-abalone-preprocess",
-        sagemaker_session=sagemaker_session,
-        role=role,
     )
+
     step_process = ProcessingStep(
         name="PreprocessAbaloneData",
-        processor=sklearn_processor,
+        processor=script_processor,
         inputs=[
         ProcessingInput(
             input_name='data',
-            source=f's3://market-data-dev-142571790518/processed/market_prices/',
+            source=f's3://market-data-dev-142571790518/processed/order_volumes/',
             destination='/opt/ml/processing/input/data')
         ],
         outputs=[
@@ -209,16 +207,16 @@ def get_pipeline(
 
     # training step for generating model artifacts
     model_path = f"{output_destination}/modelArtifacts"
-    image_uri = sagemaker.image_uris.retrieve(
+    eval_image_uri = sagemaker.image_uris.retrieve(
         framework="xgboost",
         region=region,
-        version="1.0-1",
+        version="1.7-1",
         py_version="py3",
         instance_type=training_instance_type,
     )
 
     xgb_train = Estimator(
-        image_uri=image_uri,
+        image_uri=eval_image_uri,
         instance_type=training_instance_type,
         instance_count=1,
         output_path=model_path,
@@ -236,8 +234,7 @@ def get_pipeline(
         eta=0.3,
         gamma=2,
         min_child_weight=6,
-        subsample=0.7,
-        silent=0,
+        subsample=0.7
     )
     step_train = TrainingStep(
         name="TrainAbaloneModel",
@@ -261,7 +258,7 @@ def get_pipeline(
 
     # processing step for evaluation
     script_eval = ScriptProcessor(
-        image_uri=image_uri,
+        image_uri=eval_image_uri,
         command=["python3"],
         instance_type=processing_instance_type,
         instance_count=1,
@@ -307,7 +304,7 @@ def get_pipeline(
     pipeline_session = PipelineSession()
     
     model = Model(
-        image_uri=image_uri,
+        image_uri=eval_image_uri,
         model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
         sagemaker_session=pipeline_session,
         role=role)
