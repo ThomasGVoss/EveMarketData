@@ -22,10 +22,11 @@ from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
 from sagemaker.model import Model
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
-from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor, FrameworkProcessor
+from sagemaker.tuner import ContinuousParameter, HyperparameterTuner, IntegerParameter
+from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.workflow.condition_step import ConditionStep
-from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo, ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
 from sagemaker.workflow.functions import JsonGet, Join
 from sagemaker.workflow.steps import CacheConfig
 from sagemaker.workflow.model_step import ModelStep
@@ -34,7 +35,7 @@ from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.properties import PropertyFile
 from sagemaker.workflow.step_collections import RegisterModel
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.workflow.steps import ProcessingStep, TuningStep
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 logger = logging.getLogger(__name__)
@@ -126,9 +127,9 @@ def get_pipeline(
     processing_instance_count = ParameterInteger(
         name="ProcessingInstanceCount", default_value=1)
     processing_instance_type = ParameterString(
-        name="ProcessingInstanceType", default_value="ml.c3.xlarge")
+        name="ProcessingInstanceType", default_value="ml.t3.xlarge")
     training_instance_type = ParameterString(
-        name="TrainingInstanceType", default_value="ml.c3.xlarge")
+        name="TrainingInstanceType", default_value="ml.m4.xlarge")
     model_approval_status = ParameterString(
         name="ModelApprovalStatus", default_value="Approved")
 
@@ -140,7 +141,7 @@ def get_pipeline(
     # Upload the preprocessing script to S3
     preprocessing_code_prefix = "processing_code"
     preprocessing_code_s3_uri = sagemaker_session.upload_data(
-        path="pipelines/abalone/preprocess.py",
+        path="training_pipelines/abalone/preprocess.py",
         bucket=pipeline_bucket,
         key_prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/{preprocessing_code_prefix}"
     )
@@ -148,7 +149,7 @@ def get_pipeline(
     #Upload the evaluation script to S3
     evaluation_code_prefix = "evaluation_code"
     evaluation_code_s3_uri = sagemaker_session.upload_data(
-        path="pipelines/abalone/evaluate.py",
+        path="training_pipelines/abalone/evaluate.py",
         bucket=pipeline_bucket,
         key_prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/{evaluation_code_prefix}"
     )
@@ -229,16 +230,26 @@ def get_pipeline(
     )
     xgb_train.set_hyperparameters(
         objective="reg:squarederror",
-        num_round=500,
-        max_depth=10,
-        eta=0.3,
-        gamma=2,
-        min_child_weight=6,
-        subsample=0.7
+        eval_metric="mae",
+        num_round=200,
     )
-    step_train = TrainingStep(
-        name="TrainAbaloneModel",
+
+    hyperparameter_range = {
+        "max_depth": IntegerParameter(1,10),
+        "eta":ContinuousParameter(0.01, 1),
+        "gamma":ContinuousParameter(0.01,2),
+        "min_child_weight": ContinuousParameter(1,10),
+    }
+
+    tuner = HyperparameterTuner(
         estimator=xgb_train,
+        objective_metric_name="validation:mae",
+        hyperparameter_ranges=hyperparameter_range,
+        max_jobs=10,
+        max_parallel_jobs=2,
+        objective_type="Minimize",)
+    
+    hpo_args = tuner.fit(
         inputs={
             "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
@@ -253,6 +264,11 @@ def get_pipeline(
                 content_type="text/csv",
             ),
         },
+    )
+
+    step_train = TuningStep(
+        name="TrainAbaloneModel",
+        step_args=hpo_args,
         cache_config=cache_config
     )
 
@@ -304,6 +320,7 @@ def get_pipeline(
     pipeline_session = PipelineSession()
     
     model = Model(
+        name=f"{base_job_prefix}-abalone-model-{timestamp}",
         image_uri=eval_image_uri,
         model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
         sagemaker_session=pipeline_session,
@@ -311,7 +328,7 @@ def get_pipeline(
 
     step_model_create = ModelStep(
         name="MyModelCreationStep",
-        step_args=model.create(instance_type="ml.m5.xlarge"))
+        step_args=model.create(instance_type="ml.c4.xlarge"))
     
     cond_lte = ConditionGreaterThanOrEqualTo(
         left=JsonGet(
@@ -337,12 +354,10 @@ def get_pipeline(
     register_model_step_args = pipeline_model.register(
         # content_types=["application/json"],
         # response_types=["application/json"],
-        # inference_instances=["ml.t2.medium", "ml.m5.xlarge"],
-        # transform_instances=["ml.m5.xlarge"],
         content_types=["text/csv"],
         response_types=["text/csv"],
-        inference_instances=["ml.t2.medium", "ml.m5.large"],
-        transform_instances=["ml.m5.large"],
+        inference_instances=["ml.t2.medium", "ml.c4.xlarge"],
+        transform_instances=["ml.c4.xlarge"],
         model_package_group_name=model_package_group_name,
         approval_status=model_approval_status,
     )

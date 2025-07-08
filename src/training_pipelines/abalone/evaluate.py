@@ -2,7 +2,6 @@
 import json
 import logging
 import pathlib
-import pickle
 import tarfile
 
 import numpy as np
@@ -12,9 +11,8 @@ import xgboost
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler())
-
 
 
 if __name__ == "__main__":
@@ -23,14 +21,22 @@ if __name__ == "__main__":
     with tarfile.open(model_path) as tar:
         tar.extractall(path=".")
 
-    logger.debug("Loading xgboost model.")
-    model = pickle.load(open("xgboost-model", "rb"))
+    logger.debug("Trying to load xgboost model.")
+    logger.debug("Listing extracted files in current directory:")
+    for item in pathlib.Path(".").iterdir():
+        logger.debug(f"Found: {item}")
+        
+    logger.debug("Loading the model from 'xgboost-model'.") 
+
+    try: 
+        model = xgboost.Booster()
+        model.load_model("xgboost-model")
+    except Exception as e: 
+        raise Exception(f"Could not load the model from 'xgboost-model'. Ensure the file exists and is a valid XGBoost model.") from e
 
     logger.debug("Reading test data.")
     test_path = "/opt/ml/processing/test/test.csv"
     df = pd.read_csv(test_path, header=None)
-
-    logger.debug("Reading test data.")
     y_test = df.iloc[:, 0].to_numpy()
     df.drop(df.columns[0], axis=1, inplace=True)
     X_test = xgboost.DMatrix(df.values)
@@ -63,4 +69,7 @@ if __name__ == "__main__":
     logger.info(f"Writing out evaluation report with mse: {mse}, mae: {mae}, r2: {r2}.")
     evaluation_path = f"{output_dir}/evaluation.json"
     with open(evaluation_path, "w") as f:
-        f.write(json.dumps(report_dict))
+        #f.write(json.dumps(report_dict))
+        json.dump(report_dict, f)
+
+    logger.info(f"Evaluation report written to {evaluation_path}.")

@@ -16,7 +16,7 @@ from __future__ import absolute_import
 import argparse
 import sys
 
-from pipelines._utils import get_pipeline_driver
+from training_pipelines._utils import get_pipeline_driver
 
 
 def main():  # pragma: no cover

@@ -4,7 +4,7 @@ import setuptools
 
 about = {}
 here = os.path.abspath(os.path.dirname(__file__))
-with open(os.path.join(here, "pipelines", "__version__.py")) as f:
+with open(os.path.join(here, "__version__.py")) as f:
     exec(f.read(), about)
 
 
@@ -49,8 +49,10 @@ setuptools.setup(
     extras_require=extras,
     entry_points={
         "console_scripts": [
-            "get-pipeline-definition=pipelines.get_pipeline_definition:main",
-            "run-pipeline=pipelines.run_pipeline:main",
+            "get-training-pipeline-definition=training_pipelines.get_pipeline_definition:main",
+            "run-training-pipeline=training_pipelines.run_pipeline:main",
+            "get-inference-pipeline-definition=inference_pipelines.get_pipeline_definition:main",
+            "run-inference-pipeline=inference_pipelines.run_pipeline:main",
         ]
     },
     classifiers=[

@@ -10,7 +10,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
-# from tokenizers import BertWordPieceTokenizer
+from tokenizers import BertWordPieceTokenizer
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -57,7 +57,7 @@ def feat_engineer_timebased(df):
     return timebased_features
 
 
-def crerate_train_df(df):
+def create_train_df(df):
     # select a subset of columns for training and ensure the target column is present and in the first position
     # SageMaker XGBoost has the convention of target in the first column
     df = df[[
@@ -79,77 +79,74 @@ def crerate_train_df(df):
     return df
              
 
-# class EmbeddingTransformer(BaseEstimator, TransformerMixin):
-#     def __init__(self, string_features, max_length=5, vocab_size=20):
-#         self.max_length = max_length
-#         self.vocab_size = vocab_size
-#         self.tokenizer = BertWordPieceTokenizer()
-#         self.string_features = string_features
-#         self.is_fitted_ = False
+class EmbeddingTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, string_features, max_length=5, vocab_size=20):
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.tokenizer = BertWordPieceTokenizer()
+        self.string_features = string_features
+        self.is_fitted_ = False
 
-#     def fit(self, X, y=None):
-#         unique_values = pd.unique(X[self.string_features].astype(str).values.flatten()).tolist()
-#         self.tokenizer.train_from_iterator(
-#             unique_values,
-#             vocab_size=self.vocab_size,
-#             min_frequency=1,
-#             special_tokens=[
-#                 "[PAD]",
-#                 "[CLS]",
-#                 "[SEP]",
-#                 "[UNK]",
-#                 "[MASK]",
-#             ],
-#         )
-#         self.is_fitted_ = True
-#         return self
+    def fit(self, X, y=None):
+        unique_values = pd.unique(X[self.string_features].astype(str).values.flatten()).tolist()
+        self.tokenizer.train_from_iterator(
+            unique_values,
+            vocab_size=self.vocab_size,
+            min_frequency=1,
+            special_tokens=[
+                "[PAD]",
+                "[CLS]",
+                "[SEP]",
+                "[UNK]",
+                "[MASK]",
+            ],
+        )
+        self.is_fitted_ = True
+        return self
 
-#     def transform(self, X, column=None):
-#         if not self.is_fitted_:
-#             raise RuntimeError("The transformer has not been fitted yet.")
-#         # Use the provided column or default to self.string_features
-#         result = []
+    def transform(self, X, column=None):
+        if not self.is_fitted_:
+            raise RuntimeError("The transformer has not been fitted yet.")
+        # Use the provided column or default to self.string_features
+        result = []
         
-#         if column is None:
-#             col = self.string_features
-#         else:
-#             col = column if isinstance(column, list) else [column]
+        if column is None:
+            col = self.string_features
+        else:
+            col = column if isinstance(column, list) else [column]
 
-#         for c in col:
-#             values = X[c].astype(str).values
-#             encoded = [self.tokenizer.encode(str(x)) for x in values]
-#             padded = np.zeros((len(encoded), self.max_length), dtype=int)
-#             for i, seq in enumerate(encoded):
-#                 padded[i, :min(len(seq.ids), self.max_length)] = seq.ids[:self.max_length]
+        for c in col:
+            values = X[c].astype(str).values
+            encoded = [self.tokenizer.encode(str(x)) for x in values]
+            padded = np.zeros((len(encoded), self.max_length), dtype=int)
+            for i, seq in enumerate(encoded):
+                padded[i, :min(len(seq.ids), self.max_length)] = seq.ids[:self.max_length]
                 
-#             df = pd.DataFrame(padded, columns=[f"{c}_token_{i}" for i in range(self.max_length)])
-#             result.append(df)
-#         # Concatenate all token columns horizontally
-#         return pd.concat(result, axis=1)
+            df = pd.DataFrame(padded, columns=[f"{c}_token_{i}" for i in range(self.max_length)])
+            result.append(df)
+        # Concatenate all token columns horizontally
+        return pd.concat(result, axis=1)
     
     
-def fit_pipeline(df, numeric_features, base_dir):
-    # numeric_transformer = make_pipeline(
-    #                     SimpleImputer(strategy='mean'),
-    #                     StandardScaler())
-    
-    categorical_features = ["is_buy_order"]
+def fit_pipeline(df, numeric_features, categorical_features, string_features, base_dir):
+    numeric_transformer = make_pipeline(
+                        SimpleImputer(strategy='mean'),
+                        # StandardScaler()
+                        )
 
     categorical_transformer = make_pipeline(
                         OneHotEncoder())
     
-    # string_features = ["type_id"]
-    
-    # embedding_transformer = make_pipeline(
-    #                     EmbeddingTransformer(string_features, max_length=5, vocab_size=20))
+
+    embedding_transformer = make_pipeline(
+                        EmbeddingTransformer(string_features, max_length=5, vocab_size=1000))
 
     preprocess = ColumnTransformer(
         transformers=[
-            # ("num", numeric_transformer, numeric_features),
+            ("num", numeric_transformer, numeric_features),
             ("cat", categorical_transformer, categorical_features),
-            # ("embed", embedding_transformer, string_features),
+            ("embed", embedding_transformer, string_features),
         ])
-
 
     preprocess.fit(df)
     joblib.dump(preprocess, f"{base_dir}/encoder/model.joblib")
@@ -157,10 +154,8 @@ def fit_pipeline(df, numeric_features, base_dir):
     return preprocess
 
 
-def main():
+def main(base_dir="/opt/ml/processing"):
     logger.debug("Starting preprocessing.")
-
-    base_dir = "/opt/ml/processing"
 
     logger.debug("Reading downloaded data.")
     df = pd.read_parquet(f"{base_dir}/input/data")
@@ -174,40 +169,47 @@ def main():
     # merge it back to the original dataframe
     df = pd.merge(df, df_timebased, on=["type_id", "reference_timestamp","is_buy_order"], how="left")
     
-    df = crerate_train_df(df)
+    df = create_train_df(df)
     df = df.dropna()
 
     logger.debug("Defining transformers.")
         
-    numeric_features = []
+    numeric_features = ["min_sell_price_prev_1", "max_buy_price_prev_1",
+                        "min_sell_price_prev_2", "max_buy_price_prev_2",
+                        "min_sell_price_prev_3", "max_buy_price_prev_3",
+                        "min_sell_price_prev_4", "max_buy_price_prev_4",
+                        "min_sell_price_prev_5", "max_buy_price_prev_5"]
+    
+    categorical_features = ["is_buy_order"]
+
+    string_features = ["type_id"]
 
     logger.info("Splitting %d rows of data into train, validation, test datasets.", len(df))
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     train, validation, test = np.split(df, [int(0.7 * len(df)), int(0.85 * len(df))])
 
     logger.info("Fitting transformers on train dataset with %d rows.", len(train))
-    preprocess = fit_pipeline(df, numeric_features, base_dir)   
-    logger.info("Applying transforms.")
-   
+    preprocess = fit_pipeline(df, numeric_features, categorical_features, string_features, base_dir)   
+    
+    logger.info("Applying transforms. Make sure that the target column is the first column in the output CSV files.")
     y = train.pop("max_buy_price")
     X_train = preprocess.transform(train)
     y_train = y.to_numpy().reshape(len(y), 1)
-    train = np.concatenate((X_train, y_train), axis=1)
-
+    train = np.concatenate((y_train, X_train), axis=1)
     pd.DataFrame(train).to_csv(
         f"{base_dir}/train/train.csv", header=False, index=False)
 
     y = validation.pop("max_buy_price")
     X_validation = preprocess.transform(validation)
     y_validation = y.to_numpy().reshape(len(y), 1)
-    validation = np.concatenate((X_validation, y_validation), axis=1)
+    validation = np.concatenate((y_validation, X_validation), axis=1)
     pd.DataFrame(validation).to_csv(
         f"{base_dir}/validation/validation.csv", header=False, index=False)
     
     y = test.pop("max_buy_price")
     X_test = preprocess.transform(test)
     y_test = y.to_numpy().reshape(len(y), 1)
-    test = np.concatenate((X_test, y_test), axis=1)
+    test = np.concatenate((y_test, X_test), axis=1)
     pd.DataFrame(test).to_csv(
         f"{base_dir}/test/test.csv", header=False, index=False)
 

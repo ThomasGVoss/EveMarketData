@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 
-from pipelines._utils import get_pipeline_driver, convert_struct, get_pipeline_custom_tags
+from training_pipelines._utils import get_pipeline_driver, convert_struct, get_pipeline_custom_tags
 
 
 def main():  # pragma: no cover
