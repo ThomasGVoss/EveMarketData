@@ -228,28 +228,33 @@ def get_pipeline(
         max_wait=7200,  # 2 hours
         max_run=3600,   # 1 hour
     )
+
     xgb_train.set_hyperparameters(
         objective="reg:squarederror",
-        eval_metric="mae",
+        eval_metric="rmse",
         num_round=200,
     )
 
-    hyperparameter_range = {
+    hyperparameter_ranges = {
         "max_depth": IntegerParameter(1,10),
-        "eta":ContinuousParameter(0.01, 1),
-        "gamma":ContinuousParameter(0.01,2),
-        "min_child_weight": ContinuousParameter(1,10),
+        "eta": ContinuousParameter(0.01, 1),
+        "alpha": ContinuousParameter(0.01, 2),
+        "gamma": ContinuousParameter(0.01,2),
+        "min_child_weight": IntegerParameter(1,10),
     }
 
     tuner = HyperparameterTuner(
         estimator=xgb_train,
-        objective_metric_name="validation:mae",
-        hyperparameter_ranges=hyperparameter_range,
-        max_jobs=10,
+        objective_metric_name="validation:rmse",
+        hyperparameter_ranges=hyperparameter_ranges,
+        max_jobs=2,
         max_parallel_jobs=2,
-        objective_type="Minimize",)
-    
-    hpo_args = tuner.fit(
+        objective_type="Minimize"
+        )
+
+    step_train = TuningStep(
+        name="TrainAbaloneModel",
+        tuner=tuner,
         inputs={
             "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
@@ -264,11 +269,6 @@ def get_pipeline(
                 content_type="text/csv",
             ),
         },
-    )
-
-    step_train = TuningStep(
-        name="TrainAbaloneModel",
-        step_args=hpo_args,
         cache_config=cache_config
     )
 
@@ -292,7 +292,11 @@ def get_pipeline(
         processor=script_eval,
         inputs=[
             ProcessingInput(
-                source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+                source=step_train.get_top_model_s3_uri(
+                    top_k=0,
+                    s3_bucket=pipeline_bucket,
+                    prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/modelArtifacts"
+                ),
                 destination="/opt/ml/processing/model",
             ),
             ProcessingInput(
@@ -322,7 +326,11 @@ def get_pipeline(
     model = Model(
         name=f"{base_job_prefix}-abalone-model-{timestamp}",
         image_uri=eval_image_uri,
-        model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+        model_data=step_train.get_top_model_s3_uri(
+                    top_k=0,
+                    s3_bucket=pipeline_bucket,
+                    prefix=f"{pipeline_name}/{pipeline_name}--{date}--{pipeline_run_id}/modelArtifacts"
+                ),
         sagemaker_session=pipeline_session,
         role=role)
 

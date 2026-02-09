@@ -176,7 +176,7 @@ def get_pipeline(
     model_path = f"{model_location}/modelArtifacts"
     #TODO: We need the model name that we have registered in the training step
     transformer = Transformer(  
-                        model_name= "pipelines-9ptlbyt0687d-MyModelCreationStep--B0fOybidU2", 
+                        model_name= "pipelines-polwhpg0fvb2-MyModelCreationStep--MzAeu6upoC", 
                         instance_count= 1,
                         instance_type= inference_instance_type,
                         output_path=f"{model_path}/transform",
