@@ -9,6 +9,7 @@ import boto3
 import logging
 import json
 import os
+import re
 
 # Configure logging
 logger = logging.getLogger()
@@ -27,21 +28,24 @@ job.init(args['JOB_NAME'], args)
 # Set bucket and paths
 bucket_name = args.get('s3_bucket_name')
 
-
 # Set Spark configuration for better performance
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 spark.conf.set("spark.sql.broadcastTimeout", "7200")
 
 # Define paths
-raw_data_path = f"s3://{bucket_name}/raw/api-data/orders/"
+raw_prefix = "raw/api-data/orders/"
 processed_data_path = f"s3://{bucket_name}/processed/order_volumes/"
-aggregated_data_path = f"s3://{bucket_name}/aggregated/order_volumes/"
 
 # S3 client for metadata operations
 s3_client = boto3.client('s3')
 
-# Function to save checkpoint
+# Checkpoint tracks the last fully processed day (year/month/day).
+# Using >= in the filter means the checkpoint day is always reprocessed,
+# picking up any new hourly files that arrived since the last run.
+checkpoint_path = "checkpoints/order_volumes_checkpoint.json"
+
+
 def save_checkpoint(bucket_name, checkpoint_path, last_partition):
     try:
         s3_client.put_object(
@@ -53,7 +57,7 @@ def save_checkpoint(bucket_name, checkpoint_path, last_partition):
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {str(e)}")
 
-# Function to read checkpoint
+
 def read_checkpoint(bucket_name, checkpoint_path):
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=checkpoint_path)
@@ -68,49 +72,97 @@ def read_checkpoint(bucket_name, checkpoint_path):
         return None
 
 
-# Read the checkpoint
-last_partition = read_checkpoint(bucket_name, "checkpoints/order_volumes_checkpoint.json")
+## -------------------- DATA DISCOVERY --------------------
 
-# Check if source data exists
+# Paginate through all objects in the raw prefix to find hour-level folders.
+paginator = s3_client.get_paginator('list_objects_v2')
+s3_folders = set()
 try:
-    response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix="raw/api-data/orders/")
-    if 'Contents' not in response or len(response['Contents']) == 0:
-        logger.info(f"No files found in {raw_data_path}. Exiting.")
-        job.commit()
-        sys.exit(1)
-    logger.info(f"Found {len(response['Contents'])} files to process.")
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=raw_prefix):
+        for item in page.get('Contents', []):
+            folder_path = os.path.dirname(item['Key'])
+            if 'hour=' in folder_path:
+                s3_folders.add(folder_path)
 except Exception as e:
-    logger.error(f"Error checking for files: {str(e)}")
+    logger.error(f"Error listing S3 objects: {str(e)}")
     job.commit()
     sys.exit(1)
 
-# Read raw data
-try:
-    df = spark.read.json(raw_data_path)
-    logger.info(f"Loaded raw data with {df.count()} rows.")
-
-except Exception as e:
-    logger.error(f"Error reading raw data: {str(e)}")
+if not s3_folders:
+    logger.info(f"No files found under s3://{bucket_name}/{raw_prefix}. Exiting.")
     job.commit()
-    sys.exit(1)
+    sys.exit(0)
 
-# Write processed data
-try:
-    df.write.mode("overwrite").partitionBy("year", "month", "day", "hour").parquet(processed_data_path)
-    logger.info(f"Processed data written to {processed_data_path}.")
-except Exception as e:
-    logger.error(f"Error writing processed data: {str(e)}")
+logger.info(f"Found {len(s3_folders)} distinct hour-level folders.")
+
+# Filter to folders on or after the checkpoint day so that partially-processed
+# days (i.e. when a second hourly run lands) are always picked up.
+last_partition = read_checkpoint(bucket_name, checkpoint_path)
+if last_partition:
+    checkpoint_day = (
+        f"raw/api-data/orders/year={last_partition['year']}"
+        f"/month={last_partition['month']}/day={last_partition['day']}"
+    )
+    logger.info(f"Including folders from checkpoint day onwards: {checkpoint_day}")
+    s3_folders = [f for f in s3_folders if f >= checkpoint_day]
+
+if not s3_folders:
+    logger.info("No new folders to process since last checkpoint. Exiting.")
     job.commit()
-    sys.exit(1)
+    sys.exit(0)
 
-# Save checkpoint
+## -------------------- DATA READING --------------------
+# Read all qualifying folders in a single Spark call, then derive partition
+# columns from the source file path using input_file_name().  This avoids
+# building a deeply-nested union tree when many hour-level folders are present.
+
+s3_paths = [f"s3://{bucket_name}/{f}" for f in sorted(s3_folders)]
+logger.info(f"Reading {len(s3_paths)} folder(s) from S3.")
+
+df = spark.read.json(s3_paths)
+
+# Extract year / month / day / hour from the file path embedded in each record.
+path_pattern = r'raw/api-data/orders/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})'
+df = (
+    df
+    .withColumn("_src_path", F.input_file_name())
+    .withColumn("year",  F.regexp_extract(F.col("_src_path"), path_pattern, 1))
+    .withColumn("month", F.regexp_extract(F.col("_src_path"), path_pattern, 2))
+    .withColumn("day",   F.regexp_extract(F.col("_src_path"), path_pattern, 3))
+    .withColumn("hour",  F.regexp_extract(F.col("_src_path"), path_pattern, 4))
+    .withColumn(
+        "processed_timestamp",
+        F.concat_ws(" ",
+            F.concat_ws("-", F.col("year"), F.col("month"), F.col("day")),
+            F.concat_ws(":", F.col("hour"), F.lit("00"), F.lit("00"))
+        )
+    )
+    .drop("_src_path")
+)
+
+logger.info(f"Loaded {df.count()} rows from raw data.")
+
+## -------------------- WRITE ONE PARQUET FILE PER DAY --------------------
+# repartition() by the day-level columns ensures a single output file per day.
+
+logger.info(f"Writing daily parquet files to {processed_data_path}")
+(
+    df
+    .repartition(F.col("year"), F.col("month"), F.col("day"))
+    .write
+    .mode("overwrite")
+    .partitionBy("year", "month", "day")
+    .parquet(processed_data_path)
+)
+logger.info("Write complete.")
+
+## -------------------- CHECKPOINT --------------------
+
 last_processed_partition = {
-    "year": max(df.select("year").distinct().rdd.flatMap(lambda x: x).collect()),
+    "year":  max(df.select("year").distinct().rdd.flatMap(lambda x: x).collect()),
     "month": max(df.select("month").distinct().rdd.flatMap(lambda x: x).collect()),
-    "day": max(df.select("day").distinct().rdd.flatMap(lambda x: x).collect()),
-    "hour": max(df.select("hour").distinct().rdd.flatMap(lambda x: x).collect())
+    "day":   max(df.select("day").distinct().rdd.flatMap(lambda x: x).collect()),
 }
-save_checkpoint(bucket_name, "checkpoints/order_volumes_checkpoint.json", last_processed_partition)
+save_checkpoint(bucket_name, checkpoint_path, last_processed_partition)
 
-# Commit the job
 job.commit()

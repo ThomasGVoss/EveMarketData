@@ -4,9 +4,7 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, TimestampType
 import datetime
 import boto3
 import os
@@ -43,15 +41,13 @@ spark.conf.set("spark.sql.broadcastTimeout", "7200")
 s3_client = boto3.client('s3')
 
 # Raw data path prefix and processed data path
-raw_data_path = f"s3://{bucket_name}/raw/api-data/prices/"
+raw_prefix = "raw/api-data/prices/"
 processed_data_path = f"s3://{bucket_name}/processed/market_prices/"
-# New path for aggregated data
-aggregated_data_path = f"s3://{bucket_name}/aggregated/market_prices/"
 
-# Define the checkpoint path in S3
+# Checkpoint tracks the last fully processed day (year/month/day)
 checkpoint_path = "checkpoints/last_processed_partition.json"
 
-# Save the last processed partition
+
 def save_checkpoint(bucket_name, checkpoint_path, last_partition):
     try:
         s3_client.put_object(
@@ -63,7 +59,7 @@ def save_checkpoint(bucket_name, checkpoint_path, last_partition):
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {str(e)}")
 
-# Read the last processed partition from the checkpoint
+
 def read_checkpoint(bucket_name, checkpoint_path):
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=checkpoint_path)
@@ -77,147 +73,107 @@ def read_checkpoint(bucket_name, checkpoint_path):
         logger.error(f"Failed to read checkpoint: {str(e)}")
         return None
 
-## -------------------- START OF DATA PROCESSING SECTION --------------------
 
-# Check if source data exists
-try:
-    # List objects to verify there's data to process
-    response = s3_client.list_objects_v2(
-        Bucket=bucket_name,
-        Prefix="raw/api-data/prices/"
-    )
-    
-    if 'Contents' not in response or len(response['Contents']) == 0:
-        logger.info(f"No files found in {raw_data_path}. Exiting.")
-        job.commit()
-        sys.exit(1)
-        
-    file_count = len(response['Contents'])
-    logger.info(f"Found {file_count} files to process in the raw data path")
-    
-    # Extract all folder paths to analyze the structure
-    s3_folders = set()
-    for item in response['Contents']:
-        key = item['Key']
-        # Get the directory path up to the hour level
-        folder_path = os.path.dirname(key)
-        # Only add if it contains hour= to get the most specific path
-        if 'hour=' in folder_path:
-            s3_folders.add(folder_path)
-    
-    logger.info(f"Found {len(s3_folders)} distinct folder paths: {list(s3_folders)[:5]}...")
-    
-except Exception as e:
-    logger.error(f"Error checking for files: {str(e)}")
-    job.commit()
-    sys.exit(1)
-
-# Read the checkpoint
-last_partition = read_checkpoint(bucket_name, checkpoint_path)
-
-# Filter folders based on the checkpoint
-if last_partition:
-    logger.info(f"Filtering folders starting from partition: {last_partition}")
-    s3_folders = [
-        folder for folder in s3_folders
-        if folder >= f"raw/api-data/prices/year={last_partition['year']}/month={last_partition['month']}/day={last_partition['day']}/hour={last_partition['hour']}"
-    ]
-else:
-    logger.info("Processing all folders as no checkpoint exists.")
-
-# Function to extract date from path with the specific format
 def extract_date_from_path(path):
-    # Expected format: raw/api-data/prices/year=YYYY/month=MM/day=DD/hour=HH/
+    """Extract year/month/day/hour from a hive-partitioned S3 folder path."""
     pattern = r'raw/api-data/prices/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})'
     match = re.search(pattern, path)
-    
     if match:
-        year = match.group(1)
-        month = match.group(2)
-        day = match.group(3)
-        hour = match.group(4)
-        
-        # Create timestamp string
-        timestamp_str = f"{year}-{month}-{day} {hour}:00:00"
+        year, month, day, hour = match.groups()
         return {
-            "timestamp": timestamp_str,
+            "timestamp": f"{year}-{month}-{day} {hour}:00:00",
             "year": year,
             "month": month,
             "day": day,
-            "hour": hour
+            "hour": hour,
         }
-    else:
-        # Log error if pattern doesn't match
-        logger.error(f"Could not extract date components from path: {path}")
-        # Default to current time
-        now = datetime.datetime.utcnow()
-        return {
-            "timestamp": now.strftime('%Y-%m-%d %H:%M:%S'),
-            "year": now.strftime('%Y'),
-            "month": now.strftime('%m'),
-            "day": now.strftime('%d'),
-            "hour": now.strftime('%H')
-        }
+    logger.error(f"Could not extract date components from path: {path}")
+    now = datetime.datetime.utcnow()
+    return {
+        "timestamp": now.strftime('%Y-%m-%d %H:%M:%S'),
+        "year": now.strftime('%Y'),
+        "month": now.strftime('%m'),
+        "day": now.strftime('%d'),
+        "hour": now.strftime('%H'),
+    }
 
-# Read the files and track their source paths
-logger.info(f"Reading files from S3 while preserving source paths")
 
-# Create a list to store dataframes with their source information
+## -------------------- DATA DISCOVERY --------------------
+
+# Paginate through all objects in the raw prefix
+paginator = s3_client.get_paginator('list_objects_v2')
+s3_folders = set()
+try:
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=raw_prefix):
+        for item in page.get('Contents', []):
+            folder_path = os.path.dirname(item['Key'])
+            if 'hour=' in folder_path:
+                s3_folders.add(folder_path)
+except Exception as e:
+    logger.error(f"Error listing S3 objects: {str(e)}")
+    job.commit()
+    sys.exit(1)
+
+if not s3_folders:
+    logger.info(f"No files found under s3://{bucket_name}/{raw_prefix}. Exiting.")
+    job.commit()
+    sys.exit(0)
+
+logger.info(f"Found {len(s3_folders)} distinct hour-level folders.")
+
+# Filter folders that are newer than the checkpoint (day-level)
+last_partition = read_checkpoint(bucket_name, checkpoint_path)
+if last_partition:
+    checkpoint_day = (
+        f"raw/api-data/prices/year={last_partition['year']}"
+        f"/month={last_partition['month']}/day={last_partition['day']}"
+    )
+    logger.info(f"Skipping folders up to day: {checkpoint_day}")
+    s3_folders = [f for f in s3_folders if f > checkpoint_day]
+
+if not s3_folders:
+    logger.info("No new folders to process since last checkpoint. Exiting.")
+    job.commit()
+    sys.exit(0)
+
+## -------------------- DATA READING --------------------
+
 dataframes = []
-
-# Process each folder separately to extract timestamps
-for folder_path in s3_folders:
+for folder_path in sorted(s3_folders):
     full_path = f"s3://{bucket_name}/{folder_path}"
     logger.info(f"Processing folder: {folder_path}")
-    
-    # Extract date components from path
     date_info = extract_date_from_path(folder_path)
-    
     try:
-        # Read data from this specific folder
         folder_df = spark.read.json(full_path)
-                   
-        # Add timestamp and partition columns based on folder path
         folder_df = folder_df.withColumn("processed_timestamp", F.lit(date_info["timestamp"]))
-        folder_df = folder_df.withColumn("year", F.lit(date_info["year"]))
+        folder_df = folder_df.withColumn("year",  F.lit(date_info["year"]))
         folder_df = folder_df.withColumn("month", F.lit(date_info["month"]))
-        folder_df = folder_df.withColumn("day", F.lit(date_info["day"]))
-        folder_df = folder_df.withColumn("hour", F.lit(date_info["hour"]))
-        folder_df = folder_df.withColumn("source_path", F.lit(folder_path))
-        
-        # Add this dataframe to our list
+        folder_df = folder_df.withColumn("day",   F.lit(date_info["day"]))
+        folder_df = folder_df.withColumn("hour",  F.lit(date_info["hour"]))
         dataframes.append(folder_df)
-        
     except Exception as e:
         logger.error(f"Error processing folder {folder_path}: {str(e)}")
         continue
 
-# If we have no valid dataframes, exit
 if not dataframes:
-    logger.error("No valid data found in any folders. Exiting.")
+    logger.error("No valid data found in any folder. Exiting.")
     job.commit()
     sys.exit(1)
 
-# Union all the dataframes together
+# Union all hour-level dataframes
 df = dataframes[0]
 for additional_df in dataframes[1:]:
     df = df.unionByName(additional_df, allowMissingColumns=True)
 
-# If df has nested arrays (common when reading directly from JSON files)
+# Expand nested arrays when the JSON file wraps records in an "items" key
 if "items" in df.columns:
-    # Assume items is an array column containing the market data records
-    nested_df = df.select(
-        "processed_timestamp", "year", "month", "day", "hour", "source_path",
+    df = df.select(
+        "processed_timestamp", "year", "month", "day", "hour",
         F.explode(F.col("items")).alias("item")
-    )
-    df = nested_df.select("processed_timestamp", "year", "month", "day", "hour", "source_path", "item.*")
+    ).select("processed_timestamp", "year", "month", "day", "hour", "item.*")
 
-# Check data types for adjusted_price, average_price, and type_id
-logger.info("Checking data types of critical columns:")
-df_types = {field.name: field.dataType for field in df.schema.fields}
-logger.info(f"Data types: {df_types}")
+## -------------------- CAST COLUMN TYPES --------------------
 
-# Make sure columns are of correct type
 if "adjusted_price" in df.columns:
     if not str(df.schema["adjusted_price"].dataType).startswith("DoubleType"):
         df = df.withColumn("adjusted_price", F.col("adjusted_price").cast("double"))
@@ -228,20 +184,28 @@ if "type_id" in df.columns:
     if not str(df.schema["type_id"].dataType).startswith("LongType"):
         df = df.withColumn("type_id", F.col("type_id").cast("long"))
 
-# Write to processed location with partitioning
-logger.info(f"Writing processed data to {processed_data_path}")
-df.write.mode("overwrite").partitionBy("year", "month", "day", "hour").parquet(processed_data_path)
+## -------------------- WRITE ONE PARQUET FILE PER DAY --------------------
+# Repartition so that each day lands in exactly one Parquet file, then
+# write with Hive-style partitioning by year/month/day.
 
-# Determine the last processed partition
+logger.info(f"Writing daily parquet files to {processed_data_path}")
+(
+    df
+    .repartition(F.col("year"), F.col("month"), F.col("day"))
+    .write
+    .mode("overwrite")
+    .partitionBy("year", "month", "day")
+    .parquet(processed_data_path)
+)
+logger.info("Write complete.")
+
+## -------------------- CHECKPOINT --------------------
+
 last_processed_partition = {
-    "year": max(df.select("year").distinct().rdd.flatMap(lambda x: x).collect()),
+    "year":  max(df.select("year").distinct().rdd.flatMap(lambda x: x).collect()),
     "month": max(df.select("month").distinct().rdd.flatMap(lambda x: x).collect()),
-    "day": max(df.select("day").distinct().rdd.flatMap(lambda x: x).collect()),
-    "hour": max(df.select("hour").distinct().rdd.flatMap(lambda x: x).collect())
+    "day":   max(df.select("day").distinct().rdd.flatMap(lambda x: x).collect()),
 }
-
-# Save the checkpoint
 save_checkpoint(bucket_name, checkpoint_path, last_processed_partition)
 
-# End the job
 job.commit()
