@@ -19,7 +19,7 @@ resource "aws_glue_crawler" "market_prices_crawler" {
   schedule      = var.crawler_schedule
 
   s3_target {
-    path = "s3://${var.s3_bucket_name}/raw/api-data/prices/"
+    path = "s3://${var.s3_bucket_name}/processed/market_prices/"
   }
 
   schema_change_policy {
@@ -46,7 +46,7 @@ resource "aws_glue_crawler" "market_orders_crawler" {
   schedule      = var.crawler_schedule
 
   s3_target {
-    path = "s3://${var.s3_bucket_name}/raw/api-data/orders/"
+    path = "s3://${var.s3_bucket_name}/processed/order_volumes/"
   }
 
   schema_change_policy {
@@ -104,12 +104,9 @@ resource "aws_glue_job" "market_prices_processing" {
     "--database_name"                    = aws_glue_catalog_database.market_data_database.name
     "--s3_bucket_name"                   = var.s3_bucket_name
     "--TempDir"                          = "s3://${var.s3_bucket_name}/temp/"
-    "--job-bookmark-option"              = "job-bookmark-enable"
     "--enable-metrics"                   = ""
     "--enable-continuous-cloudwatch-log" = "true"
     "--enable-auto-scaling"              = "true"
-    "--find_latest_partition"            = "true"
-    "--use_specific_partition"           = "false"
   }
 
   execution_property {

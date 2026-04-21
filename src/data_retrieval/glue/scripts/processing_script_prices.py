@@ -33,6 +33,7 @@ logger.info(f"Job parameters: bucket_name={bucket_name}")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 spark.conf.set("spark.sql.broadcastTimeout", "7200")
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
 # S3 client for metadata operations
 s3_client = boto3.client('s3')
