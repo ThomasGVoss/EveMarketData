@@ -8,10 +8,14 @@ import logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Module-level clients are reused across warm Lambda invocations
+http = urllib3.PoolManager()
+s3_client = boto3.client('s3')
+
+
 def get_market_prices():
     """Retrieve market prices from EVE ESI API"""
     url = "https://esi.evetech.net/latest/markets/prices/"
-    http = urllib3.PoolManager()
     response = http.request("GET", url)
     
     if response.status != 200:
@@ -36,9 +40,6 @@ def lambda_handler(event, context):
         s3_path = f"raw/api-data/prices/year={year}/month={month}/day={day}/hour={hour}/"
         file_name = f"price_data_{timestamp}.json"
         full_path = s3_path + file_name
-        
-        # Initialize S3 client
-        s3_client = boto3.client('s3')
         
         # Get bucket name from environment variable
         bucket_name = os.environ.get('S3_BUCKET_NAME')
