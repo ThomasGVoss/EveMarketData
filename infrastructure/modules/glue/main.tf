@@ -19,7 +19,7 @@ resource "aws_glue_crawler" "market_prices_crawler" {
   schedule      = var.crawler_schedule
 
   s3_target {
-    path = "s3://${var.s3_bucket_name}/raw/api-data/prices/"
+    path = "s3://${var.s3_bucket_name}/processed/market_prices/"
   }
 
   schema_change_policy {
@@ -46,7 +46,7 @@ resource "aws_glue_crawler" "market_orders_crawler" {
   schedule      = var.crawler_schedule
 
   s3_target {
-    path = "s3://${var.s3_bucket_name}/raw/api-data/orders/"
+    path = "s3://${var.s3_bucket_name}/processed/order_volumes/"
   }
 
   schema_change_policy {
@@ -94,35 +94,25 @@ resource "aws_glue_job" "market_prices_processing" {
   role_arn = aws_iam_role.glue_role.arn
 
   command {
-    name            = "glueetl"
+    name            = "pythonshell"
     script_location = "s3://${var.s3_bucket_name}/scripts/processing_script_prices.py"
-    python_version  = "3"
+    python_version  = "3.9"
   }
 
   default_arguments = {
     "--job-language"                     = "python"
     "--database_name"                    = aws_glue_catalog_database.market_data_database.name
     "--s3_bucket_name"                   = var.s3_bucket_name
-    "--TempDir"                          = "s3://${var.s3_bucket_name}/temp/"
-    "--job-bookmark-option"              = "job-bookmark-enable"
     "--enable-metrics"                   = ""
     "--enable-continuous-cloudwatch-log" = "true"
-    "--enable-auto-scaling"              = "true"
-    "--find_latest_partition"            = "true"
-    "--use_specific_partition"           = "false"
   }
 
   execution_property {
     max_concurrent_runs = 1
   }
 
-  # Use Flex execution type with auto-scaling
-  glue_version      = "4.0"
-  worker_type       = "G.1X" # Flex type starting at 2 DPU
-  number_of_workers = 2
-
-  # Auto-scaling configuration
-  execution_class = "FLEX"
+  glue_version  = "4.0"
+  max_capacity  = 0.0625
 
   timeout = 60
 
@@ -137,31 +127,24 @@ resource "aws_glue_job" "order_volumes_processing" {
   role_arn = aws_iam_role.glue_role.arn
 
   command {
-    name            = "glueetl"
+    name            = "pythonshell"
     script_location = "s3://${var.s3_bucket_name}/scripts/processing_script_volumes.py"
-    python_version  = "3"
+    python_version  = "3.9"
   }
 
   default_arguments = {
     "--job-language"                     = "python"
     "--s3_bucket_name"                   = var.s3_bucket_name
-    "--TempDir"                          = "s3://${var.s3_bucket_name}/temp/"
     "--enable-metrics"                   = ""
     "--enable-continuous-cloudwatch-log" = "true"
-    "--enable-auto-scaling"              = "true"
   }
 
   execution_property {
     max_concurrent_runs = 1
   }
 
-  # Use Flex execution type with auto-scaling
-  glue_version      = "4.0"
-  worker_type       = "G.1X" # Flex type starting at 2 DPU
-  number_of_workers = 2
-
-  # Auto-scaling configuration
-  execution_class = "FLEX"
+  glue_version  = "4.0"
+  max_capacity  = 0.0625
 
   timeout = 60
 

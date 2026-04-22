@@ -97,7 +97,7 @@ with st.sidebar:
 
 if 'data_loaded' not in st.session_state or not st.session_state.data_loaded:
     with st.spinner("Loading datasets from S3..."):
-        price_data = load_parquet_files_from_s3(bucket_name, "aggregated/market_prices/")
+        price_data = load_parquet_files_from_s3(bucket_name, "processed/market_prices/")
         volumen_data = load_parquet_files_from_s3(bucket_name, "processed/order_volumes/")
 
         if price_data is not None and volumen_data is not None:
