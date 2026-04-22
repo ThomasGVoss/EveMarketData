@@ -1,39 +1,26 @@
 import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, LongType
+import argparse
+import json
+import re
 import boto3
 import os
 import logging
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pyarrow.fs import S3FileSystem
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize Glue context
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-
-# Get job parameters
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 's3_bucket_name'])
-job.init(args['JOB_NAME'], args)
-
-# Set bucket and paths
-bucket_name = args.get('s3_bucket_name')
+# Parse job parameters
+parser = argparse.ArgumentParser()
+parser.add_argument('--s3_bucket_name', required=True)
+args, _ = parser.parse_known_args()
+bucket_name = args.s3_bucket_name
 
 logger.info(f"Job parameters: bucket_name={bucket_name}")
-
-# Set Spark configuration for better performance
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
-spark.conf.set("spark.sql.broadcastTimeout", "7200")
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
 # S3 client for metadata operations
 s3_client = boto3.client('s3')
@@ -87,73 +74,73 @@ try:
                 s3_folders.add(folder_path)
 except Exception as e:
     logger.error(f"Error listing S3 objects: {str(e)}")
-    job.commit()
     sys.exit(1)
 
 if not source_keys:
     logger.info(f"No files found under s3://{bucket_name}/{raw_prefix}. Exiting.")
-    job.commit()
     sys.exit(0)
 
 logger.info(f"Found {len(source_keys)} file(s) in {len(s3_folders)} hour-level folder(s).")
 
 ## -------------------- DATA READING --------------------
-# Read all raw files in a single Spark call and derive partition columns
-# from each record's source path via input_file_name().
+# Download each raw file via boto3 and load into pandas DataFrames.
 
-s3_paths = [f"s3://{bucket_name}/{f}" for f in sorted(s3_folders)]
-df = spark.read.json(s3_paths)
-
-# Expand nested arrays when the JSON wraps records in an "items" key.
-if "items" in df.columns:
-    df = df.select(
-        F.input_file_name().alias("_src_path"),
-        F.explode(F.col("items")).alias("item"),
-    ).select("_src_path", "item.*")
-else:
-    df = df.withColumn("_src_path", F.input_file_name())
-
-# Extract year / month / day / hour from the embedded file path.
-path_pattern = r'raw/api-data/prices/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})'
-df = (
-    df
-    .withColumn("year",  F.regexp_extract(F.col("_src_path"), path_pattern, 1))
-    .withColumn("month", F.regexp_extract(F.col("_src_path"), path_pattern, 2))
-    .withColumn("day",   F.regexp_extract(F.col("_src_path"), path_pattern, 3))
-    .withColumn("hour",  F.regexp_extract(F.col("_src_path"), path_pattern, 4))
-    .withColumn(
-        "processed_timestamp",
-        F.concat_ws(" ",
-            F.concat_ws("-", F.col("year"), F.col("month"), F.col("day")),
-            F.concat_ws(":", F.col("hour"), F.lit("00"), F.lit("00")),
-        ),
-    )
-    .drop("_src_path")
+path_pattern = re.compile(
+    r'raw/api-data/prices/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})'
 )
+
+frames = []
+for key in sorted(source_keys):
+    match = path_pattern.search(key)
+    if not match:
+        logger.warning(f"Skipping key with unexpected path format: {key}")
+        continue
+    year, month, day, hour = match.groups()
+
+    response = s3_client.get_object(Bucket=bucket_name, Key=key)
+    payload = json.loads(response['Body'].read().decode('utf-8'))
+
+    # Prices API wraps records in an "items" key on some responses.
+    if isinstance(payload, dict):
+        if "items" in payload:
+            records = payload["items"]
+        else:
+            logger.warning(f"Unexpected payload structure for key {key}: dict without 'items'")
+            records = payload
+    else:
+        records = payload
+    frame = pd.json_normalize(records)
+    frame["year"] = year
+    frame["month"] = month
+    frame["day"] = day
+    frame["hour"] = hour
+    frame["processed_timestamp"] = f"{year}-{month}-{day} {hour}:00:00"
+    frames.append(frame)
+
+df = pd.concat(frames, ignore_index=True)
 
 ## -------------------- CAST COLUMN TYPES --------------------
 
 if "adjusted_price" in df.columns:
-    if not isinstance(df.schema["adjusted_price"].dataType, DoubleType):
-        df = df.withColumn("adjusted_price", F.col("adjusted_price").cast("double"))
+    df["adjusted_price"] = df["adjusted_price"].astype("float64")
 if "average_price" in df.columns:
-    if not isinstance(df.schema["average_price"].dataType, DoubleType):
-        df = df.withColumn("average_price", F.col("average_price").cast("double"))
+    df["average_price"] = df["average_price"].astype("float64")
 if "type_id" in df.columns:
-    if not isinstance(df.schema["type_id"].dataType, LongType):
-        df = df.withColumn("type_id", F.col("type_id").cast("long"))
+    df["type_id"] = df["type_id"].astype("int64")
 
 ## -------------------- WRITE ONE PARQUET FILE PER DAY --------------------
-# repartition() by the day-level columns ensures a single output file per day.
+# pyarrow write_to_dataset writes Hive-style partitioned parquet directly to S3.
 
 logger.info(f"Writing daily parquet files to {processed_data_path}")
-(
-    df
-    .repartition(F.col("year"), F.col("month"), F.col("day"))
-    .write
-    .mode("overwrite")
-    .partitionBy("year", "month", "day")
-    .parquet(processed_data_path)
+table = pa.Table.from_pandas(df, preserve_index=False)
+fs = S3FileSystem()
+output_path = f"{bucket_name}/processed/market_prices"
+pq.write_to_dataset(
+    table,
+    root_path=output_path,
+    partition_cols=["year", "month", "day"],
+    existing_data_behavior="overwrite_or_ignore",
+    filesystem=fs,
 )
 logger.info("Write complete.")
 
@@ -163,5 +150,3 @@ logger.info("Write complete.")
 logger.info(f"Archiving {len(source_keys)} source file(s).")
 archive_source_files(bucket_name, source_keys)
 logger.info("Archiving complete.")
-
-job.commit()
